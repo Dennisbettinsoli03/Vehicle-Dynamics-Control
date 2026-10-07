@@ -1,0 +1,27 @@
+# MATLAB autosave and editor backups
+*.asv
+*.m~
+*.autosave
+
+# Simulink cache and generated code
+*.slxc
+slprj/
+*.slx.r20*
+*.original
+codegen/
+*_ert_rtw/
+*_grt_rtw/
+*.mexw64
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# OS files
+.DS_Store
+__MACOSX/
+Thumbs.db
+desktop.ini

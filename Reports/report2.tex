@@ -1,0 +1,725 @@
+% =====================================================================
+% Report content to be pasted INSIDE \begin{document} ... \end{document}
+%
+% Required packages in your Overleaf preamble:
+%   \usepackage{graphicx}
+%   \usepackage{amsmath, amssymb}
+%   \usepackage{float}        % for [H] figure placement
+%   \usepackage{booktabs}     % nice tables (\toprule, \midrule, \bottomrule)
+%   \usepackage{listings}     % code snippets
+%   \usepackage{xcolor}
+%   \usepackage{hyperref}     % cross-references
+%   \lstset{basicstyle=\ttfamily\footnotesize, breaklines=true,
+%           keywordstyle=\color{blue}, commentstyle=\color{gray!80!black},
+%           numbers=left, numberstyle=\tiny, stepnumber=1, frame=single,
+%           language=Matlab}
+%
+% Place the folders 'images_part1' and 'images_part2' next to your main.tex
+% =====================================================================
+
+\title{Lateral Vehicle Dynamics and Lane-Keeping Control \\ \large Project 2 -- Driver Assistance System Design}
+\author{Dennis [Surname] \\ Politecnico di Torino}
+\date{\today}
+\maketitle
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+The lateral dynamics of a road vehicle govern its directional behaviour
+during cornering and overtaking, and ultimately determine the
+effectiveness of any lane-keeping or path-tracking driver-assistance
+function. The linear single-track (``bicycle'') model captures the
+two main degrees of freedom of interest -- sideslip angle $\beta$ and
+yaw rate $\dot\psi$ -- with sufficient accuracy for stability and
+controller-design tasks, while the dynamic single-track (DST) and the
+nonlinear Pacejka variant (DSTP) are used as more realistic plants for
+closed-loop simulations.
+
+This project is organised in two parts:
+\begin{itemize}
+    \item \textbf{Part 1 -- Lateral Dynamics.} Computation of the
+          derivatives of stability, root-locus analysis of the
+          linearised state-space system as a function of speed, time
+          response to a step steer, and steady-state vehicle gains
+          (path curvature, lateral acceleration, sideslip).
+    \item \textbf{Part 2 -- Lane-Keeping Control.} Implementation of
+          DST/DSTP models in Simulink, design and comparison of
+          PDF/PIDF controllers (with two error structures) at
+          $65$\,km/h and $100$\,km/h, implementation of a Stanley
+          kinematic controller and final benchmark of all the
+          strategies.
+\end{itemize}
+
+The same vehicle parameters are used throughout Part 1, summarised in
+Table~\ref{tab:params}. The cornering stiffness values $C_1$ and
+$C_2$ are not constant input data: they are extracted from the
+\texttt{TireData.xlsx} file (Pacejka block) by linear fitting of the
+$F_y(\alpha)$ curve near zero slip, evaluated at the static axle loads
+$F_{z,1}\!\approx\!6$\,kN (front) and $F_{z,2}\!\approx\!4$\,kN (rear)
+that follow from the longitudinal mass distribution.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lcl}
+        \toprule
+        \textbf{Symbol} & \textbf{Value} & \textbf{Description} \\
+        \midrule
+        $a$    & $0.923$\,m       & Front axle -- c.o.g. distance \\
+        $b$    & $1.376$\,m       & Rear axle -- c.o.g. distance \\
+        $m$    & $1020$\,kg       & Vehicle mass \\
+        $J_z$  & $1225$\,kg\,m$^2$& Yaw inertia \\
+        $t$    & $1.365$\,m       & Track width \\
+        $C_1$  & from tyre file   & Front-axle cornering stiffness \\
+        $C_2$  & from tyre file   & Rear-axle cornering stiffness \\
+        \bottomrule
+    \end{tabular}
+    \caption{Vehicle parameters used in Part 1.}
+    \label{tab:params}
+\end{table}
+
+%======================================================================
+\section{Lateral Dynamics -- Theoretical Background}
+\label{sec:theory}
+%======================================================================
+Under the assumptions of no aerodynamic forces, nil self-aligning
+torque at the wheel contact and a linear tyre characteristic, the
+equations of high-speed cornering reduce to
+\begin{align}
+    mV(\dot\beta + \dot\psi) + m\dot V\beta &=
+        Y_\beta\,\beta + Y_{\dot\psi}\,\dot\psi + Y_\delta\,\delta,
+        \label{eq:lat_y}\\
+    J_z\,\ddot\psi &=
+        N_\beta\,\beta + N_{\dot\psi}\,\dot\psi + N_\delta\,\delta,
+        \label{eq:lat_n}
+\end{align}
+where the \emph{derivatives of stability} are
+\begin{equation}
+\begin{aligned}
+    Y_\beta      &= -(C_1 + C_2),                     &
+    N_\beta      &= -(a C_1 - b C_2), \\
+    Y_{\dot\psi} &= -\tfrac{a C_1 - b C_2}{V},        &
+    N_{\dot\psi} &= -\tfrac{a^2 C_1 + b^2 C_2}{V}, \\
+    Y_\delta     &= C_1,                              &
+    N_\delta     &= a\,C_1 .
+\end{aligned}
+\label{eq:derivatives}
+\end{equation}
+With the state vector $\mathbf{x} = [\beta,\,\dot\psi]^T$ and input
+$\delta$, neglecting external forces and braking torques, the
+state-space form reads
+\begin{equation}
+    \dot{\mathbf{x}} = A\,\mathbf{x} + B\,\delta, \quad
+    A =
+    \begin{bmatrix}
+        \dfrac{Y_\beta}{mV} & \dfrac{Y_{\dot\psi}}{mV} - 1 \\[6pt]
+        \dfrac{N_\beta}{J_z} & \dfrac{N_{\dot\psi}}{J_z}
+    \end{bmatrix},
+    \quad
+    B =
+    \begin{bmatrix}
+        \dfrac{Y_\delta}{mV} \\[6pt] \dfrac{N_\delta}{J_z}
+    \end{bmatrix}.
+    \label{eq:ss}
+\end{equation}
+
+\paragraph{Steady-state gains.}
+By zeroing the derivatives in~\eqref{eq:lat_y}--\eqref{eq:lat_n} and
+solving for the four classical performance ratios one gets
+\begin{align}
+    \frac{1}{R\delta}    &= \frac{Y_\delta N_\beta - N_\delta Y_\beta}
+        {V\bigl[N_\beta(mV - Y_{\dot\psi}) + N_{\dot\psi} Y_\beta\bigr]},
+        \label{eq:gain_curv}\\[2pt]
+    \frac{V^2}{R\delta}  &= V\,\frac{Y_\delta N_\beta - N_\delta Y_\beta}
+        {N_\beta(mV - Y_{\dot\psi}) + N_{\dot\psi} Y_\beta},
+        \label{eq:gain_ay}\\[2pt]
+    \frac{\beta}{\delta} &= \frac{-N_\delta(mV - Y_{\dot\psi}) - N_{\dot\psi} Y_\delta}
+        {N_\beta(mV - Y_{\dot\psi}) + N_{\dot\psi} Y_\beta},
+        \label{eq:gain_beta}
+\end{align}
+which respectively express the path curvature, the lateral
+acceleration and the sideslip angle per unit steering input.
+
+%======================================================================
+\section{Part 1 -- Lateral Dynamics}
+%======================================================================
+
+\subsection{Cornering stiffness extraction}
+The MATLAB script \texttt{part\_1.m} loads the Pacejka block of
+\texttt{TireData.xlsx} (columns Q:V, rows 3:203), which contains the
+lateral force $F_y$ versus slip angle $\alpha$ at five vertical loads
+$F_z \in \{2,4,6,8,10\}$\,kN. The cornering stiffness per tyre is
+identified as the slope $-\mathrm{d}F_y/\mathrm{d}\alpha$ near
+$\alpha = 0$, evaluated at the static axle loads
+\begin{equation}
+    F_{z,1} = \tfrac{m g b}{a+b} \approx 5990\,\text{N}, \qquad
+    F_{z,2} = \tfrac{m g a}{a+b} \approx 4015\,\text{N},
+\end{equation}
+which justifies the use of the columns corresponding to $6$\,kN and
+$4$\,kN. Doubling the per-tyre value (two tyres per axle) gives the
+bicycle-model equivalents $C_1$ and $C_2$:
+\begin{lstlisting}
+idx = abs(alpha_deg) < 2;            % points close to alpha = 0
+p6  = polyfit(alpha(idx), Fy(idx,3), 1);  Cp_front = -p6(1);  % Fz = 6 kN
+p4  = polyfit(alpha(idx), Fy(idx,2), 1);  Cp_rear  = -p4(1);  % Fz = 4 kN
+C1  = 2*Cp_front;                    % front axle
+C2  = 2*Cp_rear;                     % rear  axle
+\end{lstlisting}
+
+\subsection{Stability derivatives and state-space at 80 km/h}
+With $V_0 = 80/3.6$\,m/s and the identified stiffness, the local
+function \texttt{bicycleSS} returns the numerical derivatives of
+stability and the matrices $A$, $B$ in~\eqref{eq:ss}:
+\begin{lstlisting}
+function [A,B,der] = bicycleSS(V,C1,C2,a,b,m,Jz)
+    der.Yb = -(C1 + C2);
+    der.Yr = -(a*C1 - b*C2)/V;
+    der.Nb = -(a*C1 - b*C2);
+    der.Nr = -(a^2*C1 + b^2*C2)/V;
+    der.Yd = C1;
+    der.Nd = a*C1;
+    A = [ der.Yb/(m*V),  der.Yr/(m*V)-1 ;
+          der.Nb/Jz,     der.Nr/Jz      ];
+    B = [ der.Yd/(m*V) ;
+          der.Nd/Jz    ];
+end
+\end{lstlisting}
+At $80$\,km/h the eigenvalues of $A$ are a stable complex-conjugate
+pair, consistent with the lightly damped yaw/sideslip oscillation
+typical of a passenger car at moderate-to-high speed. The negative
+real part guarantees asymptotic stability of the free response.
+
+\subsection{Root loci versus speed}
+Sweeping $V$ in the interval $[2,60]$\,m/s and computing the
+eigenvalues of $A(V)$ traces the locus of the two closed-loop poles
+of the lateral dynamics. The result is shown in
+Figure~\ref{fig:rootloci}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{images_part1/Root loci vs speed.png}
+    \caption{Root loci of the $[\beta,\,\dot\psi]$ state-space system
+    as a function of vehicle speed.}
+    \label{fig:rootloci}
+\end{figure}
+
+At very low speed the two poles lie on the negative real axis and are
+far apart ($\sim\!-160$ and $\sim\!-8$), denoting an overdamped
+heading response dominated by tyre friction. As the speed increases,
+the two real poles approach each other, collide on the real axis at
+the breakaway point ($V\!\approx\!12$--$14$\,m/s, i.e. $\sim 45$
+km/h) and then become a complex-conjugate pair. The imaginary part
+grows with $V$ -- reaching $\pm 7$\,rad/s at the upper end of the
+sweep -- while the real part remains negative and stabilises around
+$-3\,\div\,-5$, showing a progressive reduction of damping ratio with
+speed. The locus stays entirely in the left half plane: the open-loop
+vehicle is stable over the full speed range explored.
+
+\subsection{Step steer at 80 km/h}
+A small step steer command $\delta_0 = 0.03$\,rad ($\approx 1.7^\circ$
+at the wheel) is applied to the linear state-space system at
+$80$\,km/h. The time response of $\beta$ and $\dot\psi$ is plotted in
+Figure~\ref{fig:steepsteer}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{images_part1/steep_steer.png}
+    \caption{Step steer $\delta = 0.030$\,rad at $80$\,km/h:
+    sideslip angle $\beta$ (top) and yaw rate $\dot\psi$ (bottom).}
+    \label{fig:steepsteer}
+\end{figure}
+
+The yaw-rate response is well damped: $\dot\psi$ overshoots the
+steady-state value of $\sim 0.20$\,rad/s by about $5\%$ at
+$t\!\approx\!0.25$\,s and then settles within half a second.
+The sideslip $\beta$ exhibits the classical non-minimum-phase-like
+behaviour of an understeering vehicle at high speed: it rises
+positively to a peak of $\approx 4\!\times\!10^{-3}$\,rad and then
+crosses zero, settling at a small \emph{negative} value of
+$\approx -2\!\times\!10^{-3}$\,rad. Physically, the front tyres
+develop lateral force first, the chassis rotates outwards, and only
+later the rear axle catches up giving a negative steady-state
+sideslip -- a clear signature of mild understeer.
+
+\subsection{Steady-state gains}
+The four gain expressions~\eqref{eq:gain_curv}--\eqref{eq:gain_beta}
+are evaluated over the same speed range as the root locus.
+Figure~\ref{fig:gains} reports curvature, lateral acceleration and
+sideslip angle gains versus speed in km/h, with a vertical dashed
+line marking the design speed of $80$\,km/h.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part1/Figure_3.png}
+    \caption{Steady-state gains versus vehicle speed: path curvature
+    $1/(R\delta)$ (top), lateral acceleration $V^2/(R\delta)$ (middle)
+    and sideslip angle $\beta/\delta$ (bottom).}
+    \label{fig:gains}
+\end{figure}
+
+The three plots confirm the qualitative classification of the
+vehicle:
+\begin{itemize}
+    \item the \textbf{curvature gain} decreases monotonically with
+          speed -- from $\approx 0.43$\,m$^{-1}$ at low speed down to
+          $\approx 0.10$\,m$^{-1}$ at $200$\,km/h. The vehicle needs
+          progressively more steering input to negotiate a given
+          curve as it speeds up, a hallmark of an \emph{understeering}
+          characteristic;
+    \item the \textbf{lateral acceleration gain} grows almost
+          linearly with $V$ up to $\sim 80$\,km/h and then bends
+          downwards as the saturation $V^2/R\delta$ approaches its
+          asymptote. At $80$\,km/h the gain is $\approx 150$
+          (m/s$^2$)/rad, i.e. $0.26$\,g per degree of steering;
+    \item the \textbf{sideslip angle gain} crosses zero at
+          $\approx 80$\,km/h, becoming negative at higher speed.
+          This crossover is the \emph{characteristic speed} predicted
+          by the understeer theory: above it, the steady-state
+          sideslip points outwards from the curve centre, a
+          condition that requires the driver to add steering input
+          to maintain the trajectory.
+\end{itemize}
+The design speed of $80$\,km/h sits exactly on the sideslip
+crossover, which makes it a natural reference point for the
+controller-design phase in Part 2.
+
+%======================================================================
+\section{Part 2 -- Lane-Keeping Control}
+%======================================================================
+The second part of the project shifts the focus from open-loop
+analysis to closed-loop lane keeping. A reference trajectory
+$Y_r(X) = 10\sin(0.01\,X)$ -- a sine wave with $10$\,m amplitude and
+$\approx 628$\,m wavelength -- is sampled at $20\,000$ points; the
+target heading $\psi_r$ is obtained by numerical differentiation. The
+MATLAB driver \texttt{part2.m} asks the user for the cruise speed
+(allowed values: $65$ or $100$\,km/h) and chains three Simulink
+models, one per exercise. The simulation horizon is $T_\mathrm{fin} =
+150$\,s.
+
+%----------------------------------------------------------------------
+\subsection{Exercise 1 -- DST and DSTP open-loop models}
+%----------------------------------------------------------------------
+
+\subsubsection*{Simulink implementation}
+Two distinct vehicle plants are implemented in
+\texttt{project\_2\_part2\_ex1.slx}: a Dynamic Single-Track (DST)
+model with a \emph{linear} tyre characteristic and a Dynamic
+Single-Track with \emph{Pacejka} tyre (DSTP), see
+Figure~\ref{fig:sim_ex1_inner}. In both models the steer input goes
+through a first-order actuator $\dfrac{1}{0.1 s + 1}$, the differential
+equations of the DST/DSTP block are implemented in a MATLAB Function,
+and the six states $[X, Y, \psi, v_x, v_y, \omega_\psi]^T$ are
+integrated by a single $1/s$ block. The outer wrapper
+(Figure~\ref{fig:sim_ex1_outer}) routes the same sinusoidal input
+$\delta_f(t) = 0.5\sin(0.2\,t)$\,rad to both plants and exports the
+relevant signals to the workspace.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex1/simulink_DST_DSTP_models.png}
+    \caption{Internal structure of the DST (linear) and DSTP
+    (Pacejka) Simulink blocks used in Exercise 1.}
+    \label{fig:sim_ex1_inner}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex1/simulink_1.png}
+    \caption{Top-level wrapper of Exercise 1: the same steering input
+    drives both models in parallel and the signals are exported to
+    MATLAB.}
+    \label{fig:sim_ex1_outer}
+\end{figure}
+
+\subsubsection*{Simulation results}
+With initial conditions
+$(X_0,Y_0)=(0,0)$\,m, $\psi_0 = 0^\circ$,
+$v_x(0) = 80$\,km/h, $v_y(0) = \omega_\psi(0) = 0$, no longitudinal
+acceleration ($a_x = 0$) and the sinusoidal steering input above,
+the two plants produce the trajectories shown in
+Figure~\ref{fig:ex1_results}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_part2/ex1/DST_DSTP_plots.png}
+    \caption{Exercise 1: trajectory $(X,Y)$ and longitudinal speed
+    $v_x$ for the linear DST model (top row) and the nonlinear DSTP
+    model (bottom row).}
+    \label{fig:ex1_results}
+\end{figure}
+
+The linear model produces a quasi-periodic trajectory bounded inside
+a $\sim\!100\times 80$\,m box: the lateral force scales linearly
+with slip angle, so each steering cycle generates the same yaw
+moment and the vehicle traces a series of overlapping loops. The
+longitudinal speed drops sharply from $22$\,m/s to a steady
+$\approx 11$\,m/s and oscillates only mildly, because the linear tyre
+keeps reabsorbing energy through the $v_y\omega_\psi$ coupling in
+$\dot v_x$.
+
+The Pacejka model, conversely, drifts to the bottom right of the
+plane reaching $X\!\approx\!250$\,m and $Y\!\approx\!-180$\,m. The
+saturated lateral force at large slip angles limits the yaw moment
+the vehicle can develop, so the trajectory is no longer symmetric and
+the longitudinal speed settles around $10.5$\,m/s after a slower
+transient. This is the expected qualitative difference: the linear
+tyre overestimates the cornering capability of the vehicle and
+underestimates its longitudinal energy loss, while the Pacejka tyre
+delivers a realistic, asymmetric, partly-saturating behaviour.
+
+%----------------------------------------------------------------------
+\subsection{Exercise 2 -- PDF and PIDF lane-keeping controllers}
+%----------------------------------------------------------------------
+
+\subsubsection*{Error definitions and controller structure}
+Two error signals are extracted by the \texttt{errors} MATLAB
+Function from the reference and the actual front-axle pose:
+\begin{itemize}
+    \item the \textbf{cross-track error} $e_{ct}$, i.e. the lateral
+          distance of the front axle from the reference path,
+          projected onto the local normal direction;
+    \item the \textbf{heading error} $e_h = \psi_a - \psi_r$, i.e.
+          the angular mismatch between vehicle and tangent.
+\end{itemize}
+For each cruise speed two controller architectures are tested:
+\begin{enumerate}
+    \item input = $e_{ct}$ only (the heading is ignored by the
+          controller and recovers passively through the closed loop);
+    \item input = $e_{ct} + e_h$ (a simple sum of the two errors as
+          a coarse stand-in for a feed-forward heading term).
+\end{enumerate}
+The plant is the DSTP nonlinear model, fed through a first-order
+$1/(0.1 s + 1)$ steering actuator and instrumented with the
+\texttt{translatePose} block, which translates the centre-of-gravity
+pose to the front-axle pose used by the controller
+(Figure~\ref{fig:sim_ex2_plant}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_part2/ex2/simulink_DSTP_and_translatePose.png}
+    \caption{Vehicle block used in Exercise 2: DSTP model with
+    steering actuator and \texttt{translatePose} for front-axle
+    output.}
+    \label{fig:sim_ex2_plant}
+\end{figure}
+
+Two complete loops are run in parallel inside
+\texttt{project\_2\_part2\_ex2.slx} -- one with input $e_{ct}$
+(Figure~\ref{fig:sim_ex2_ect}) and one with input $e_{ct} + e_h$
+(Figure~\ref{fig:sim_ex2_ect_eh}). Both feed a PDF or a PIDF block
+(selected by the workspace flags \texttt{controller1}/\texttt{controller2}),
+tuned through the Simulink PID Tuner around the linearisation point
+$(X,Y,\psi)=(0,0,\psi_r(1))$, $v_x = v_{x,l}$,
+$v_y=\omega_\psi=0$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_part2/ex2/simulink_e_ct_PIDF_PDF.png}
+    \caption{Closed loop with controller input $e_{ct}$ only.}
+    \label{fig:sim_ex2_ect}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_part2/ex2/simulink_e_ct_e_h_PIDF_PDF.png}
+    \caption{Closed loop with controller input $e_{ct} + e_h$.}
+    \label{fig:sim_ex2_ect_eh}
+\end{figure}
+
+\subsubsection*{Results at 65 km/h}
+At the lower speed both controllers succeed in keeping the vehicle
+on the sinusoidal reference. Among the six combinations available
+(two errors $\times$ two controllers, plus the two steering-angle
+traces), the most representative are reported below; the remaining
+ones (PDF with $e_{ct}$ alone, and the PDF steering signals at
+$65$\,km/h) follow the same trend with negligible additional
+information and are summarised numerically in Section~\ref{sec:bench}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex2/65_km_h/e_ct_PIDF.png}
+    \caption{PIDF with input $e_{ct}$, $v_x = 65$\,km/h.}
+    \label{fig:ex2_65_pidf_ect}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex2/65_km_h/e_ct_e_h_PIDF.png}
+    \caption{PIDF with input $e_{ct}+e_h$, $v_x = 65$\,km/h.}
+    \label{fig:ex2_65_pidf_ect_eh}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex2/65_km_h/steering_angle_PIDF.png}
+    \caption{Steering angle commanded by the PIDF controller at
+    $65$\,km/h, with input $e_{ct}$ (top) and $e_{ct}+e_h$ (bottom).}
+    \label{fig:ex2_65_steer_pidf}
+\end{figure}
+
+At $65$\,km/h the PIDF with $e_{ct}$
+(Figure~\ref{fig:ex2_65_pidf_ect}) tracks the reference within a
+$\pm 0.035$\,m envelope, with the heading error confined below
+$0.1^\circ$. Switching to $e_{ct}+e_h$
+(Figure~\ref{fig:ex2_65_pidf_ect_eh}) does not improve the steady
+performance significantly: the cross-track error grows to
+$\pm 0.05$\,m because the controller now devotes part of its action
+to the heading channel as well. The PDF counterparts behave similarly
+with errors approximately three times larger ($\sim 0.11$\,m and
+$\sim 0.16$\,m respectively), due to the absence of the integral
+action that compensates for the slow drift introduced by the
+discretisation noise in $\dot Y_r$. The steering angle
+(Figure~\ref{fig:ex2_65_steer_pidf}) oscillates between $\pm 0.25^\circ$,
+i.e. comfortably below the physical actuator limit of $\delta_m =
+35^\circ$.
+
+\subsubsection*{Results at 100 km/h -- the divergence of PIDF$(e_{ct}+e_h)$}
+At $100$\,km/h the picture changes drastically. The same controllers
+tuned around the linearisation point start to interact with the
+unmodelled fast lateral dynamics, and -- because the linearisation
+was performed at a different speed -- the closed-loop poles move
+towards the right of the complex plane.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex2/100_km_h/e_ct_PDF.png}
+    \caption{PDF with input $e_{ct}$, $v_x = 100$\,km/h: large but
+    transient excursion, then good tracking.}
+    \label{fig:ex2_100_pdf_ect}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex2/100_km_h/e_ct_PIDF.png}
+    \caption{PIDF with input $e_{ct}$, $v_x = 100$\,km/h: very large
+    cross-track excursion ($\sim 60$\,m) but eventual recovery.}
+    \label{fig:ex2_100_pidf_ect}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex2/100_km_h/e_ct_e_h_PIDF.png}
+    \caption{PIDF with input $e_{ct}+e_h$, $v_x = 100$\,km/h:
+    \emph{unstable} closed loop. The cross-track error grows above
+    $900$\,m and the heading oscillates with $\pm 180^\circ$ swings.}
+    \label{fig:ex2_100_pidf_ect_eh}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex2/100_km_h/steering_angle_PIDF.png}
+    \caption{Steering angle of the PIDF controller at $100$\,km/h:
+    saturation at $\sim 600^\circ$ on the top trace and a runaway up
+    to $3.5\!\times\!10^4$\,deg on the bottom trace
+    ($e_{ct}+e_h$ case).}
+    \label{fig:ex2_100_steer_pidf}
+\end{figure}
+
+The PDF with $e_{ct}$ alone (Figure~\ref{fig:ex2_100_pdf_ect})
+survives the transient: after a $\sim 10$\,m cross-track deviation
+around $t = 12$\,s, induced by the higher lateral acceleration that
+the controller was not tuned for, the loop recovers within $\sim 30$\,s
+and stays on path. The PIDF with $e_{ct}$ alone
+(Figure~\ref{fig:ex2_100_pidf_ect}) is much worse: the integral wind-up
+amplifies the initial mismatch and the cross-track error grows to
+$\sim\!60$\,m before slowly returning towards zero.
+
+The catastrophic case is the PIDF with $e_{ct}+e_h$
+(Figure~\ref{fig:ex2_100_pidf_ect_eh}): the controller never
+recovers. After $\sim 30$\,s the cross-track error breaks loose and
+grows monotonically beyond $900$\,m, while the heading error
+oscillates with $\pm 180^\circ$ swings and the commanded steering
+angle (Figure~\ref{fig:ex2_100_steer_pidf}, bottom trace) reaches
+$3.5\!\times\!10^{4}$\,deg, far beyond any physical actuator. The
+root cause is twofold: (i) the sum $e_{ct}+e_h$ couples two
+quantities with very different sensitivities to speed -- the
+contribution of $e_h$ doubles when $V$ doubles -- so what was a
+benign feed-forward term at $65$\,km/h becomes a destabilising loop
+gain at $100$\,km/h; (ii) the integral channel of the PIDF
+accumulates the resulting bias, and the wind-up brings the closed
+loop to instability.
+
+\paragraph{Take-away of Exercise 2.}
+At low speed all four controllers (PDF/PIDF with one of the two error
+structures) provide acceptable tracking, and the PIDF with $e_{ct}$
+alone gives the smallest steady error. At high speed the same tuning
+is no longer robust: only the PDF with $e_{ct}$ stays usable, while
+the PIDF with $e_{ct}+e_h$ diverges. This motivates the introduction
+of a controller whose structure is intrinsically speed-aware -- the
+Stanley kinematic controller of Exercise 3.
+
+%----------------------------------------------------------------------
+\subsection{Exercise 3 -- Stanley kinematic controller}
+%----------------------------------------------------------------------
+
+\subsubsection*{Control law}
+The Stanley controller computes the steering command as
+\begin{equation}
+    \delta_S = \mathrm{sat}\!\left(
+        e_h + \arctan\!\frac{k\,e_{ct}}{v_b + v_x}\,
+    \right),\qquad |\delta_S| \le \delta_m,
+    \label{eq:stanley}
+\end{equation}
+where $v_b = 1$\,m/s is a small speed bias that prevents the
+denominator from vanishing at low speed and $\delta_m = 35^\circ$ is
+the physical actuator limit. The first term aligns the heading with
+the local path tangent; the second term forces a cross-track
+correction whose strength is inversely proportional to the actual
+speed -- which is precisely the speed-awareness that the PIDF
+lacked.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_part2/ex3/simulink_stanely.png}
+    \caption{Simulink implementation of the Stanley closed loop
+    (\texttt{project\_2\_part2\_ex3.slx}).}
+    \label{fig:sim_ex3}
+\end{figure}
+
+The Simulink loop (Figure~\ref{fig:sim_ex3}) reuses the
+\texttt{ref\_gen} + \texttt{errors} chain from Exercise 2 and replaces
+the PDF/PIDF block by a MATLAB Function implementing
+equation~\eqref{eq:stanley}.
+
+\subsubsection*{Comparison at 65 and 100 km/h}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex3/comparison_PIDF_Stanley_65.png}
+    \caption{PIDF vs Stanley at $65$\,km/h.}
+    \label{fig:ex3_65}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_part2/ex3/comparison_PIDF_Stanley_100.png}
+    \caption{PIDF vs Stanley at $100$\,km/h.}
+    \label{fig:ex3_100}
+\end{figure}
+
+At $65$\,km/h (Figure~\ref{fig:ex3_65}) the PIDF wins on cross-track
+accuracy ($\pm 0.035$\,m against $\pm 0.16$\,m), but the heading
+error of Stanley is appreciably smoother (a clean sinusoidal trace
+of the same amplitude as the PIDF $\pm 0.10^\circ$ noisy signal).
+The reason is that Stanley reads the heading error directly and
+produces a noise-free $\delta$, while the PIDF amplifies the
+high-frequency content of the numerical $\psi_r$.
+
+At $100$\,km/h (Figure~\ref{fig:ex3_100}) the contrast becomes
+decisive: the PIDF develops the same $\sim\!60$\,m transient already
+discussed, whereas Stanley sticks to the reference with a cross-track
+error in the centimetre range and a heading error well below
+$0.1^\circ$. The arctangent saturation effectively limits the
+authority of the cross-track channel and prevents the runaway
+observed with PIDF$(e_{ct}+e_h)$.
+
+\paragraph{Take-away of Exercise 3.}
+Stanley trades a slightly larger steady-state cross-track at low
+speed for a much more graceful behaviour at high speed and zero
+sensitivity to controller-tuning speed mismatches. For a real
+lane-keeping function operating across a wide speed range, this is
+the safer trade-off.
+
+%======================================================================
+\section{Controllers Benchmark}
+\label{sec:bench}
+%======================================================================
+The numerical performance of every (controller, error, speed)
+combination is summarised in
+Table~\ref{tab:bench}. The figures are read from the time histories
+of $e_{ct}(t)$ and $e_h(t)$ within the simulation horizon
+$T_\mathrm{fin}=150$\,s; ``stable'' means the error stays bounded and
+the steady-state tracking is preserved, ``transient'' means a finite
+excursion is followed by recovery, ``unstable'' means the error grows
+unbounded until the steering saturates.
+
+\begin{table}[H]
+    \centering
+    \footnotesize
+    \begin{tabular}{lllrrl}
+        \toprule
+        \textbf{Controller} & \textbf{Input} & \textbf{Speed} &
+        \textbf{$|e_{ct}|_\text{max}$} & \textbf{$|e_h|_\text{max}$} &
+        \textbf{Behaviour} \\
+        \midrule
+        PDF     & $e_{ct}$        & $65$\,km/h  & $\sim 0.11$ m   & $\sim 0.07^\circ$  & stable \\
+        PIDF    & $e_{ct}$        & $65$\,km/h  & $\sim 0.035$ m  & $\sim 0.08^\circ$  & stable, best at 65 \\
+        PDF     & $e_{ct}+e_h$    & $65$\,km/h  & $\sim 0.16$ m   & $\sim 0.10^\circ$  & stable \\
+        PIDF    & $e_{ct}+e_h$    & $65$\,km/h  & $\sim 0.05$ m   & $\sim 0.10^\circ$  & stable \\
+        Stanley & $e_{ct},\,e_h$  & $65$\,km/h  & $\sim 0.16$ m   & $\sim 0.10^\circ$  & stable, smooth $\delta$ \\
+        \midrule
+        PDF     & $e_{ct}$        & $100$\,km/h & $\sim 10$ m     & $\sim 80^\circ$    & transient, recovers \\
+        PIDF    & $e_{ct}$        & $100$\,km/h & $\sim 60$ m     & $\sim 180^\circ$   & transient, slow recovery \\
+        PDF     & $e_{ct}+e_h$    & $100$\,km/h & $\sim 0.4$ m    & $\sim 3^\circ$     & stable, growing oscillation \\
+        PIDF    & $e_{ct}+e_h$    & $100$\,km/h & $> 900$ m       & $\pm 180^\circ$    & \textbf{unstable} \\
+        Stanley & $e_{ct},\,e_h$  & $100$\,km/h & $< 0.05$ m      & $< 0.1^\circ$      & stable, best at 100 \\
+        \bottomrule
+    \end{tabular}
+    \caption{Benchmark of the lane-keeping controllers for the
+    sinusoidal reference $Y_r(X)=10\sin(0.01\,X)$.}
+    \label{tab:bench}
+\end{table}
+
+Three observations stand out:
+\begin{itemize}
+    \item At $65$\,km/h the \textbf{PIDF with $e_{ct}$} is the most
+          accurate option, with sub-centimetre tracking, but Stanley
+          comes very close on the heading channel and with a much
+          cleaner steering command.
+    \item Increasing the speed to $100$\,km/h destroys every linear
+          controller tuned at the lower speed. The most striking
+          collapse is PIDF$(e_{ct}+e_h)$, whose steering command runs
+          away to $3.5\!\times\!10^4$\,deg. A controller designed at
+          $65$\,km/h \emph{cannot} be safely re-used at $100$\,km/h
+          without re-tuning or gain scheduling.
+    \item Stanley is the only controller that retains good tracking
+          across the entire speed range, thanks to its explicit
+          dependence on $v_x$ in the cross-track term.
+\end{itemize}
+
+%======================================================================
+\section{Conclusions}
+%======================================================================
+The project covered the full pipeline of lateral vehicle modelling
+and control, starting from the linear bicycle model and ending with
+a non-linear closed-loop lane-keeping simulation.
+\begin{itemize}
+    \item \textbf{Part 1} confirmed that the bicycle model with
+          tyre-data-derived cornering stiffness reproduces the
+          essential features of an understeering passenger car:
+          stable pole locus over the full speed range, well-damped
+          step-steer response, decreasing curvature gain and a
+          sideslip-gain sign change at the characteristic speed of
+          $\sim 80$\,km/h.
+    \item \textbf{Exercise 1 of Part 2} highlighted the qualitative
+          difference between the DST (linear tyre) and DSTP (Pacejka
+          tyre) models: under the same aggressive sinusoidal steer,
+          the linear model produces a quasi-periodic trajectory while
+          the Pacejka one drifts due to tyre saturation. The DSTP is
+          therefore the appropriate plant for the controller-design
+          stage.
+    \item \textbf{Exercise 2} showed that, at the design speed
+          $65$\,km/h, both PDF and PIDF achieve sub-metric tracking on
+          a sinusoidal lane. Increasing the speed to $100$\,km/h
+          without re-tuning the gains exposes a clear lack of
+          robustness: the PIDF with $e_{ct}+e_h$ becomes unstable,
+          the PIDF with $e_{ct}$ alone develops a $60$\,m transient,
+          while the PDF with $e_{ct}$ recovers from a $\sim\!10$\,m
+          excursion.
+    \item \textbf{Exercise 3} demonstrated that the Stanley
+          kinematic controller, by embedding the speed $v_x$ in the
+          denominator of its cross-track term, achieves a uniform
+          high-quality tracking across $65$ and $100$\,km/h. It pays
+          a small price in steady-state cross-track at low speed but
+          remains the only architecture viable at high speed without
+          re-tuning.
+\end{itemize}
+
+The benchmark in Section~\ref{sec:bench} synthesises the message of
+the project: \emph{linear controllers tuned around a single operating
+point are intrinsically speed-sensitive, while a kinematic controller
+that takes the longitudinal speed explicitly into account preserves
+its performance over a wider envelope}. A natural extension of this
+work is a gain-scheduled PIDF (tuned at multiple speeds) or a
+model-predictive lane-keeping controller, both of which would
+combine the steady-state accuracy of PIDF at low speed with the
+robustness of Stanley at high speed.

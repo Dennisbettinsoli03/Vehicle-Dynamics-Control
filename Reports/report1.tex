@@ -1,0 +1,649 @@
+% =====================================================================
+% Report content to be pasted INSIDE \begin{document} ... \end{document}
+%
+% Required packages in your Overleaf preamble:
+%   \usepackage{graphicx}
+%   \usepackage{amsmath, amssymb}
+%   \usepackage{float}        % for [H] figure placement
+%   \usepackage{booktabs}     % nice tables (\toprule, \midrule, \bottomrule)
+%   \usepackage{listings}     % code snippets
+%   \usepackage{xcolor}
+%   \usepackage{hyperref}     % cross-references
+%   \lstset{basicstyle=\ttfamily\footnotesize, breaklines=true,
+%           keywordstyle=\color{blue}, commentstyle=\color{gray!80!black},
+%           numbers=left, numberstyle=\tiny, stepnumber=1, frame=single,
+%           language=Matlab}
+%
+% Place the images folder next to your main.tex
+% =====================================================================
+
+\title{Quarter-Car Modeling and Control \\ \large Project 1 -- Driver Assistance System Design}
+\author{Dennis [Surname] \\ Politecnico di Torino}
+\date{\today}
+\maketitle
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+The vertical dynamics of a road vehicle dominates ride comfort, road
+holding and tyre wear. The classical \emph{quarter-car} model -- two
+masses linked by a spring--damper element and connected to the ground
+through the tyre stiffness and damping -- captures the essential
+phenomena with only two degrees of freedom, while remaining simple
+enough to support analytical insight and controller design.
+
+This project investigates the quarter-car model in three progressive
+steps:
+\begin{itemize}
+    \item \textbf{Exercise 1} -- frequency-domain analysis of the
+          linear model under passive, skyhook and groundhook
+          configurations;
+    \item \textbf{Exercise 2} -- time-domain simulation under random
+          road excitation, and implementation of a
+          \emph{real-world} skyhook law on a semi-active suspension;
+    \item \textbf{Exercise 3} -- nonlinear semi-active suspension with
+          a current-controlled magneto-rheological damper, parameter
+          tuning under bump and random profiles, and Bode analysis of
+          the linearized system around two extreme operating points.
+\end{itemize}
+
+The same nominal vehicle parameters are used throughout, summarised in
+Table~\ref{tab:params}. The damping coefficient $c$ in the actual code
+is $1500\,\mathrm{Ns/m}$, slightly larger than the value suggested in
+the project assignment in order to model a stiffer reference passive
+damper representative of a medium-sized passenger car.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lcl}
+        \toprule
+        \textbf{Symbol} & \textbf{Value} & \textbf{Description} \\
+        \midrule
+        $m_s$  & $400$\,kg     & Sprung mass (chassis) \\
+        $m_u$  & $50$\,kg      & Unsprung mass (wheel + suspension) \\
+        $K$    & $25\,000$\,N/m   & Suspension stiffness \\
+        $P$    & $150\,000$\,N/m  & Tyre vertical stiffness \\
+        $c$    & $1500$\,Ns/m   & Passive damping coefficient \\
+        $c_t$  & $0$\,Ns/m      & Tyre damping coefficient \\
+        \bottomrule
+    \end{tabular}
+    \caption{Quarter-car nominal parameters.}
+    \label{tab:params}
+\end{table}
+
+%======================================================================
+\section{Quarter-Car Model -- Theoretical Background}
+\label{sec:theory}
+%======================================================================
+The 2-DOF passive quarter-car equations of motion are
+\begin{align}
+    m_s \ddot z_s &+ c(\dot z_s - \dot z_u) + K(z_s - z_u) = 0,
+    \label{eq:passive_s}\\
+    m_u \ddot z_u &+ c(\dot z_u - \dot z_s) + c_t(\dot z_u - \dot r) +
+    K(z_u - z_s) + P(z_u - r) = 0,
+    \label{eq:passive_u}
+\end{align}
+where $z_s$ and $z_u$ are the vertical displacements of the sprung and
+unsprung masses and $r$ is the road profile.
+
+\paragraph{Skyhook and groundhook.}
+An \emph{ideal} skyhook damper $c_s$ would connect the sprung mass to
+an inertial reference above the vehicle, removing low-frequency
+oscillations of the chassis. An \emph{ideal} groundhook damper $c_g$
+would connect the unsprung mass to the ground, reducing tyre-force
+fluctuations and improving handling. Both are physically unfeasible,
+but the same dynamic effect can be reproduced by an actuator placed
+between the two masses producing the force
+\begin{equation}
+    F = -(c_s + c)\dot z_s + (c + c_g)\dot z_u .
+    \label{eq:realworld}
+\end{equation}
+
+\paragraph{Damping ratios.}
+Defining the critical damping
+$c_{cr} = 2\sqrt{K m_s}$, all damping coefficients are normalised:
+\begin{equation}
+    \zeta   = \tfrac{c}{c_{cr}}, \quad
+    \zeta_t = \tfrac{c_t}{c_{cr}}, \quad
+    \zeta_s = \tfrac{c_s}{c_{cr}}, \quad
+    \zeta_g = \tfrac{c_g}{c_{cr}} .
+\end{equation}
+The control logic is conveniently expressed through two parameters,
+\begin{equation}
+    \zeta_m = \tfrac{\zeta_s + \zeta_g}{2}, \qquad
+    \zeta_d = \tfrac{\zeta_s - \zeta_g}{2}, \qquad
+    \zeta_0 = \zeta + \zeta_m ,
+\end{equation}
+where $\zeta_d > 0$ corresponds to skyhook behaviour and
+$\zeta_d < 0$ to groundhook behaviour.
+
+\paragraph{State-space representation.}
+Selecting $\mathbf{x} = [z_s, \dot z_s, z_u, \dot z_u, r]^{T}$ and
+input $u = \dot r$, the system becomes
+\begin{equation}
+    \dot{\mathbf{x}} = A\mathbf{x} + B u, \quad
+    \mathbf{y} = C\mathbf{x} + D u,
+\end{equation}
+with $\mathbf{y} = [\ddot z_s,\, F_t,\, F_{act}]^{T}$
+(comfort, handling, actuator force). The road state $r$ is appended
+in order to use $\dot r$ as a true input; this introduces a nil
+eigenvalue in $A$. The matrices used in the MATLAB scripts are
+generated symbolically in \texttt{symbolic\_state\_space\_gen.m}.
+
+%======================================================================
+\section{Exercise 1 -- Frequency-Response Analysis}
+%======================================================================
+
+\subsection{Theory}
+Three transfer functions are required by the assignment:
+\begin{equation}
+    \frac{\ddot Z_s}{R}, \qquad
+    \frac{F_t}{P R}, \qquad
+    \frac{F_{act}}{P R} .
+\end{equation}
+Since the input of the state-space model is $\dot r$, MATLAB's
+\texttt{bode} computes $X/\dot R$. Because $\dot R(j\omega) =
+j\omega\,R(j\omega)$, the conversion
+\begin{equation}
+    \left|\frac{X}{R}\right| = \omega \cdot \left|\frac{X}{\dot R}\right|
+\end{equation}
+is required, and the second and third transfer functions are further
+normalised by $P$. Each working condition is also analysed via the
+eigenvalues of $A$, which describe damping ratios and natural
+frequencies of the closed-loop system.
+
+\subsection{Implementation}
+Three damping configurations are looped over:
+\begin{lstlisting}
+switch damp
+    case 1   % passive damper
+        zeta0  = zeta;     zeta_d = 0;
+    case 2   % skyhook
+        zeta0  = 0.43;     zeta_d = 0.25;
+    case 3   % groundhook
+        zeta0  = 0.43;     zeta_d = -0.25;
+end
+\end{lstlisting}
+For each case the $A,B,C,D$ matrices are built according to
+Section~\ref{sec:theory} and a frequency vector
+$f = \mathrm{linspace}(10^{-3},100,1000)$ rad/s is fed to
+\texttt{bode}. The magnitudes returned are multiplied by
+$\omega$ (and divided by $P$ for the second and third outputs):
+\begin{lstlisting}
+sys = ss(A,B,C,D);
+[mag, phase, wout] = bode(sys, f);
+if n == 1
+    plot(wout, squeeze(mag(n,:,:)) .* wout)        % zddot_s / r
+else
+    plot(wout, squeeze(mag(n,:,:)) .* wout / P)    % F / (P*r)
+end
+\end{lstlisting}
+The eigenvalues of $A$ are then computed by \texttt{eig(A)} and plotted
+on the complex plane.
+
+\subsection{Results}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/ex1_comparison.png}
+    \caption{Frequency response of the quarter-car model under passive
+    damper, skyhook and groundhook configurations: sprung mass
+    acceleration $\ddot z_s/r$ (top), normalised tyre-force variation
+    $F_t/(Pr)$ (middle) and normalised actuator force $F_{act}/(Pr)$
+    (bottom).}
+    \label{fig:ex1_comparison}
+\end{figure}
+
+Figure~\ref{fig:ex1_comparison} highlights the three classical
+trade-offs:
+\begin{itemize}
+    \item Around the \emph{sprung mass} natural frequency
+          ($\approx 7$\,rad/s) the skyhook strongly attenuates the
+          peak of $\ddot z_s/r$, while the groundhook amplifies it.
+          This confirms the comfort-oriented nature of skyhook
+          control.
+    \item Around the \emph{unsprung mass} resonance
+          ($\approx 55$\,rad/s) the groundhook flattens the
+          tyre-force peak, while the skyhook keeps it almost as large
+          as in the passive case -- a clear handling improvement of
+          groundhook.
+    \item The actuator force is null in the passive case and exhibits
+          a peak at one of the two resonances depending on which
+          working condition is chosen (sprung resonance for skyhook,
+          unsprung resonance for groundhook), giving a quick estimate
+          of the actuator authority required.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{images/ex1_eig.png}
+    \caption{Eigenvalues (pole map) of the linearised quarter-car
+    under the three working conditions.}
+    \label{fig:ex1_eig}
+\end{figure}
+
+The pole map in Figure~\ref{fig:ex1_eig} shows two pairs of complex
+poles for the passive damper (one for the chassis mode at $\sim
+7$\,rad/s, one for the wheel mode at $\sim 56$\,rad/s). The
+\textbf{skyhook} configuration shifts the chassis poles further into
+the left half plane (more damping on $\ddot z_s$) while leaving the
+wheel poles almost unchanged. The \textbf{groundhook}, conversely,
+pushes the wheel poles deep to the left ($\sigma \approx -44$) and
+relaxes the chassis poles, which become almost critically damped on
+the real axis. The nil pole at the origin in each case comes from the
+augmented road state $r$.
+
+%======================================================================
+\section{Exercise 2.1 -- Road-Profile Excitation}
+%======================================================================
+
+\subsection{Theory}
+The road profile is now a stochastic disturbance representative of a
+real surface. The model is fed with band-limited white noise filtered
+to obtain a frequency content consistent with vehicle speed: the
+spatial PSD of the road becomes a temporal PSD that scales with
+$V$ (the longitudinal speed). The actuator force-velocity diagram
+\begin{equation}
+    F_{act} \quad \text{vs} \quad v_{rel} = \dot z_s - \dot z_u
+\end{equation}
+characterises the type of damper: a linear viscous damper would lie
+on a straight line, while skyhook/groundhook produce dispersed clouds
+because the force depends on absolute velocities rather than on
+the relative one.
+
+\subsection{Implementation -- Simulink model}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{images/sim2_1.png}
+    \caption{Simulink model \texttt{Exercise2SIM.slx} used in
+    Exercise 2.1.}
+    \label{fig:sim2_1}
+\end{figure}
+
+The Simulink model in Figure~\ref{fig:sim2_1} feeds a
+\emph{Band-Limited White Noise} block through the road shaping filter
+\begin{equation}
+    G_r(s) = \frac{2\pi\sqrt{6.4\!\cdot\!10^{-7}\,V}}{s + 1.22},
+\end{equation}
+whose gain scales with the vehicle speed $V$. The derivative block
+produces $\dot r$, which is the input of the state-space block
+implementing the $(A,B,C,D)$ matrices written by the MATLAB script.
+The outputs are demultiplexed: the relative velocity is computed as
+$\dot z_s - \dot z_u$ and logged together with the actuator force
+through \texttt{V\_act} and \texttt{F\_act} \texttt{To-Workspace}
+blocks. The MATLAB driver sweeps the three vehicle speeds and the
+three damping configurations:
+\begin{lstlisting}
+speeds = [10 30 50];
+for n = 1:length(speeds)
+    V = speeds(n);
+    for damp = 1:3
+        % set zeta0, zeta_d, build A,B,C,D
+        out = sim("Exercise2SIM.slx");
+        plot(out.V_act, out.F_act, '.')
+    end
+end
+\end{lstlisting}
+
+\subsection{Results}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{images/ex2_1.png}
+    \caption{Actuator force vs.\ relative velocity, for the three
+    control strategies at $V=10$, $30$, $50$ m/s.}
+    \label{fig:ex2_1}
+\end{figure}
+
+In Figure~\ref{fig:ex2_1} the passive damper produces a thin line
+with slope $c=1500$\,Ns/m, since $F = c\,v_{rel}$. The skyhook and
+groundhook clouds are noticeably broader: the same relative velocity
+can correspond to widely different forces depending on the absolute
+sprung and unsprung velocities. As the speed increases the road
+excitation becomes more energetic, and both the relative velocity
+range and the actuator force span grow accordingly. This confirms
+that the actuator must deliver larger forces at higher speeds,
+information that is critical for component sizing.
+
+%======================================================================
+\section{Exercise 2.2 -- ``Real-World'' Skyhook on a Semi-Active Suspension}
+%======================================================================
+
+\subsection{Theory}
+A semi-active damper can only dissipate energy: the force must be
+opposite to the relative velocity. The \emph{real-world skyhook}
+control law selects between an active-like force and a purely passive
+one according to a sign condition:
+\begin{equation}
+    F =
+    \begin{cases}
+        -(c_s + c)\dot z_s + c\,\dot z_u, &
+            \text{if } \dot z_s(\dot z_s - \dot z_u) > 0 ,\\[2pt]
+        -c(\dot z_s - \dot z_u), & \text{otherwise.}
+    \end{cases}
+    \label{eq:rw_sky}
+\end{equation}
+The first branch is active when the chassis is moving in the same
+direction as the damper would naturally push it; the second branch
+keeps the damper passive otherwise. The constraint
+$c\,v_{rel} \le F \le c_{max}\,v_{rel}$ is then imposed by a
+saturation, with $c_{max} = 4000$\,Ns/m.
+
+\subsection{Implementation}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images/sim2_2.png}
+    \caption{Simulink model \texttt{exercise2\_2SIM.slx}: the
+    real-world skyhook law is implemented inside the
+    \emph{MATLAB Function} block and applied as a second input to the
+    state-space, after a 100 Hz low-pass filter that prevents
+    chattering.}
+    \label{fig:sim2_2}
+\end{figure}
+
+In the model of Figure~\ref{fig:sim2_2} the state-space block uses
+the passive matrices (no damping inside $A$), while the actuator
+force $F$ enters $B$ as a separate input. A MATLAB Function block
+implements~\eqref{eq:rw_sky} using the sprung and unsprung velocities
+fed back from the state-space. A first-order low-pass filter with cut
+frequency $100$\,Hz smooths the discontinuity introduced by the
+switching law. The MATLAB driver sweeps the tuning parameter $c_s$:
+\begin{lstlisting}
+cs_tune = [0, 500, 1000, 2000, 3000, 4000];
+for i = 1:length(cs_tune)
+    cs = cs_tune(i);
+    out = sim('exercise2_2SIM.slx');
+    rms_acc(i) = sqrt(mean(out.acc.^2));
+end
+\end{lstlisting}
+
+\subsection{Results}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images/ex2_2.png}
+    \caption{Sprung-mass acceleration time history for $c_s = 0$
+    (passive) and five semi-active configurations.}
+    \label{fig:ex2_2}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{images/ex2_2-results.png}
+    \caption{RMS sprung-mass acceleration and percentage reduction
+    versus passive case.}
+    \label{fig:ex2_2_results}
+\end{figure}
+
+Figures~\ref{fig:ex2_2} and~\ref{fig:ex2_2_results} show that even a
+modest semi-active correction reduces the RMS acceleration: from
+$0.72$ m/s\textsuperscript{2} (passive, $c_s = 0$) to a minimum of
+$0.66$ m/s\textsuperscript{2} at $c_s = 2000$\,Ns/m, that is a
+\textbf{8.2\%} comfort improvement. Increasing $c_s$ further is
+counter-productive: the curves at $c_s = 3000$ and $4000$\,Ns/m show
+slightly higher RMS values, because the saturation activates more
+often and the switching law spends more time in the passive branch.
+The optimum is therefore $c_s \approx 2000$\,Ns/m, which sits roughly
+half-way between the passive coefficient and the prescribed
+$c_{max}$.
+
+%======================================================================
+\section{Exercise 3 (Part 1) -- Nonlinear Semi-Active Suspension}
+%======================================================================
+
+\subsection{Theory}
+A magneto-rheological (MR) damper provides a nonlinear force
+$u(I, v_{wc})$ as a function of the control current $I$ and the
+piston velocity $v_{wc} = \dot z_u - \dot z_s$. The nonlinear
+quarter-car equations are
+\begin{align}
+    m_u \ddot z_u &= -u(I, v_{wc}) - K(z_u - z_s) - P(z_u - r) -
+                     c_t(\dot z_u - \dot r),\\
+    m_s \ddot z_s &= u(I, v_{wc}) + K(z_u - z_s).
+\end{align}
+The outputs are the chassis vertical acceleration
+$y_1 = \tfrac{c}{m_s}(\dot z_u - \dot z_s) + \tfrac{K}{m_s}(z_u -
+z_s)$ and the dynamic tyre-road force
+$y_2 = P(z_u - r)$. A proportional feedback law manipulates the
+current,
+\begin{equation}
+    I = \mathrm{sat}\bigl(I_c - K_p\,y_1^d\bigr) ,
+    \quad I \in [0.29,\,1.6]\,\text{A},
+    \label{eq:ex3_ctrl}
+\end{equation}
+where $y_1^d$ is $y_1$ delayed by a Unit Delay block with
+$\tau=0.005$\,s, $I_c$ is the upper-bound current and $K_p$ is the
+tuning gain. The closed-loop adapts the damping in real time: when the
+chassis accelerates upward, the current is reduced, the damper softens
+and the disturbance is filtered; when the chassis accelerates
+downward, the current is increased and the damper hardens.
+
+\subsection{Implementation}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/sim3.png}
+    \caption{Simulink model \texttt{exercise\_3sim.slx}. From left to
+    right: random/bump selector, 2-DOF nonlinear quarter-car (four
+    integrators), 2-D lookup table for the MR damper, current control
+    loop with Unit Delay, gain $K_p$ and Saturation.}
+    \label{fig:sim3}
+\end{figure}
+
+The model in Figure~\ref{fig:sim3} contains four integrators for the
+states $\dot z_s, z_s, \dot z_u, z_u$, the algebraic relations for
+$y_1$ and $y_2$, the 2-D lookup table that returns the actuator
+force, and the discrete control branch on the right. The selector at
+the input switches between a random profile (band-limited noise
+shaped as in Exercise 2.1) and a bump shape, controlled by the
+workspace variable \texttt{inp}.
+
+\paragraph{$K_p$ tuning at $I_c = 1.6$\,A.}
+The proportional gain is swept in $K_p \in [0.2, 0.6]$ and four
+performance indicators are recorded for each road profile: RMS and
+maximum chassis acceleration, RMS and maximum tyre-ground force.
+
+\begin{lstlisting}
+K_p_tuning = linspace(0.2,0.6,20);
+for k = 1:2          % 1 = random, 2 = bump
+    inp = k;
+    for i = 1:length(K_p_tuning)
+        K_p = K_p_tuning(i);
+        sim("exercise_3sim.slx");
+        acc_RMS(i)   = sqrt(mean(Acc_sprung.^2));
+        force_RMS(i) = sqrt(mean(Tire_road_force.^2));
+        acc_Max(i)   = max(Acc_sprung);
+        force_Max(i) = max(Tire_road_force);
+    end
+end
+\end{lstlisting}
+
+\subsection{Results -- $K_p$ tuning}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/ex3_kp_rand.png}
+    \caption{$K_p$ optimisation for a random road profile,
+    $I_c = 1.6$\,A.}
+    \label{fig:ex3_kp_rand}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/ex3_kp_bump.png}
+    \caption{$K_p$ optimisation for a bump road profile,
+    $I_c = 1.6$\,A.}
+    \label{fig:ex3_kp_bump}
+\end{figure}
+
+For the \textbf{random profile}
+(Figure~\ref{fig:ex3_kp_rand}) the four metrics point to different
+optima:
+\begin{itemize}
+    \item RMS acceleration minimised at $K_p = 0.33$
+          ($1.04$ m/s\textsuperscript{2});
+    \item RMS tyre force monotonically decreasing, lowest at
+          $K_p = 0.58$ ($\approx 440$ N);
+    \item maximum acceleration minimum at $K_p = 0.26$
+          ($2.69$ m/s\textsuperscript{2}), then jumps up sharply for
+          $K_p \ge 0.3$;
+    \item maximum tyre force monotonically decreasing.
+\end{itemize}
+The classic \emph{comfort-vs-handling} trade-off emerges: comfort
+metrics favour low $K_p$ (soft damper, large body excursion absorbed
+by the suspension), while handling metrics prefer high $K_p$ (firm
+damper, smaller wheel hop).
+
+For the \textbf{bump profile}
+(Figure~\ref{fig:ex3_kp_bump}) the four optima are much closer:
+$K_p \approx 0.24$--$0.31$ minimises both RMS metrics; the maximum
+tyre force has its lowest value at $K_p \approx 0.41$. The transient
+nature of a bump excitation aligns comfort and handling indicators on
+a common interval. A reasonable single value covering both scenarios
+is $K_p \approx 0.30$: near-optimal on the bump and close to the
+RMS-acceleration optimum on the random profile, accepting a sub-optimal
+but still acceptable RMS force.
+
+\subsection{Results -- $I_c$ tuning at fixed $K_p = 0.3$}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/ex3_Ic_rand.png}
+    \caption{$I_c$ optimisation for a random road profile,
+    $K_p = 0.3$.}
+    \label{fig:ex3_Ic_rand}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images/ex3_ic_bump.png}
+    \caption{$I_c$ optimisation for a bump road profile,
+    $K_p = 0.3$.}
+    \label{fig:ex3_ic_bump}
+\end{figure}
+
+For the \textbf{random profile}
+(Figure~\ref{fig:ex3_Ic_rand}) the RMS acceleration grows almost
+linearly with $I_c$, from $0.53$ to $1.05$ m/s\textsuperscript{2}: a
+softer baseline damper is better for comfort. The RMS tyre force has
+a clear minimum at $I_c \approx 0.5$\,A; below this point the damper
+is too compliant and the wheel oscillates excessively, above it the
+sprung-mass motion injects more energy into the tyre. The maximum
+indicators show a similar non-monotonic behaviour with a minimum
+around $0.5$\,A.
+
+For the \textbf{bump profile}
+(Figure~\ref{fig:ex3_ic_bump}) the picture changes: the RMS
+acceleration is minimised around $I_c \approx 1.0$\,A, and so is the
+RMS tyre force. A bump is a deterministic, low-energy impulse, and
+extra damping helps to absorb it quickly without amplifying tyre
+hopping.
+
+\paragraph{Take-away.}
+The optimal current depends strongly on the type of excitation. A
+practical implementation therefore requires either a road-profile
+classifier (e.g., a low-pass-filtered estimator of road harshness)
+or, alternatively, a robust compromise such as $I_c \approx 0.5$\,A
+on random pavement and $I_c \approx 1.0$\,A in transient manoeuvres.
+
+%======================================================================
+\section{Exercise 3 (Part 2) -- Bode of the Linearised System}
+%======================================================================
+
+\subsection{Theory}
+The nonlinear system can be linearised in Simulink through the
+\emph{Linear Analysis Tool}: input/output perturbation points are
+added on the road derivative and on the two outputs $y_1, y_2$;
+Simulink computes a Jacobian linearisation around the chosen
+operating point. The resulting state-space approximates the closed
+loop with the lookup table replaced by its local slope
+$\partial u / \partial v_{wc}$, that is, an equivalent linear damper
+of coefficient $c_{eq}(I)$. As $I$ varies between $0.29$\,A and
+$1.6$\,A the equivalent damping spans more than one order of
+magnitude.
+
+\subsection{Implementation}
+The linearisation session was saved as \texttt{linearization.mat},
+which contains two \texttt{ss} objects named \texttt{Low\_current}
+($I_c = 0.29$\,A) and \texttt{High\_current} ($I_c = 1.6$\,A). They
+are reloaded and used to draw a Bode plot directly from MATLAB:
+\begin{lstlisting}
+S = load('linearization.mat');
+for k = 1:numel(S.LocalVariables)
+    switch S.LocalVariables(k).Name
+        case 'Low_current',  sys_low  = S.LocalVariables(k).Value;
+        case 'High_current', sys_high = S.LocalVariables(k).Value;
+    end
+end
+figure
+bode(sys_low, 'b', sys_high, 'r');
+legend('I_c = 0.29 A','I_c = 1.6 A','Location','best')
+grid on
+\end{lstlisting}
+
+\subsection{Results}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{images/ex3_bode.png}
+    \caption{Bode diagram of the linearised semi-active system. Top:
+    transfer function to the tyre-road force; bottom: transfer
+    function to the chassis vertical acceleration.}
+    \label{fig:ex3_bode}
+\end{figure}
+
+The Bode plots in Figure~\ref{fig:ex3_bode} reproduce the two-mode
+structure already observed in Exercise 1: the chassis resonance
+appears around $7$\,rad/s and the wheel resonance around
+$55$--$60$\,rad/s. The high-current condition shows a more damped
+chassis peak (better comfort at low frequencies) but a slightly more
+pronounced wheel resonance, while the low-current condition produces
+the opposite. This is exactly the ``skyhook envelope'' that the
+proportional controller \eqref{eq:ex3_ctrl} aims to exploit: by
+moving along the current axis in real time, the closed loop can
+choose, frequency by frequency, the most favourable response between
+the two extremes. Compared to the linear analysis of Exercise 1, the
+peaks here are slightly broader because the linearisation absorbs
+the nonlinear lookup at a single operating point, but the overall
+agreement is very satisfactory.
+
+%======================================================================
+\section{Conclusions}
+%======================================================================
+The project provided a complete view of vertical vehicle dynamics
+seen from the angle of suspension control, moving from idealised
+linear analysis to a realistic semi-active implementation with a
+magneto-rheological damper.
+
+\begin{itemize}
+    \item Frequency-domain analysis (Exercise 1) confirmed the
+          complementary nature of skyhook and groundhook: the former
+          excels around the chassis mode, the latter around the wheel
+          mode. Eigenvalue analysis showed how the two strategies
+          relocate the corresponding pole pairs.
+    \item Time-domain simulation (Exercise 2.1) translated these
+          observations into actuator-force/relative-velocity
+          diagrams, useful for component sizing across the operating
+          speed range.
+    \item The real-world skyhook on a semi-active suspension
+          (Exercise 2.2) reduced the RMS chassis acceleration by
+          $\sim 8\%$ with a moderate tuning ($c_s \approx 2000$\,Ns/m),
+          while respecting the dissipative constraint.
+    \item The nonlinear MR-damper model (Exercise 3) showed that the
+          control gain $K_p$ and the baseline current $I_c$ must be
+          chosen jointly with the type of road excitation. A
+          compromise tuning $K_p \approx 0.3$, $I_c \approx
+          0.5$--$1.0$\,A behaved consistently on both bump and random
+          profiles.
+    \item The Bode analysis of the linearised closed loop
+          (Exercise 3, Part 2) closed the picture by confirming that
+          the semi-active controller spans an envelope between the
+          two extreme passive equivalents, formally justifying the
+          observed performance.
+\end{itemize}
+
+Overall, the model has proved consistent across all three exercises:
+linear predictions, time-domain simulations and linearised Bode of
+the nonlinear system all match within the expected accuracy.

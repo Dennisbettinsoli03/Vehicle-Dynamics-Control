@@ -1,0 +1,702 @@
+% =====================================================================
+% Report content to be pasted INSIDE \begin{document} ... \end{document}
+%
+% Required packages in your Overleaf preamble:
+%   \usepackage{graphicx}
+%   \usepackage{amsmath, amssymb}
+%   \usepackage{float}        % for [H] figure placement
+%   \usepackage{booktabs}     % nice tables (\toprule, \midrule, \bottomrule)
+%   \usepackage{listings}     % code snippets
+%   \usepackage{xcolor}
+%   \usepackage{hyperref}     % cross-references
+%   \lstset{basicstyle=\ttfamily\footnotesize, breaklines=true,
+%           keywordstyle=\color{blue}, commentstyle=\color{gray!80!black},
+%           numbers=left, numberstyle=\tiny, stepnumber=1, frame=single,
+%           language=Matlab}
+%
+% Place the folder 'images_project3' next to your main.tex
+% =====================================================================
+
+\title{Adaptive Cruise Control Design \\ \large Project 3 -- Driver Assistance System Design}
+\author{Dennis [Surname] \\ Politecnico di Torino}
+\date{\today}
+\maketitle
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+Adaptive Cruise Control (ACC) is one of the most widespread longitudinal
+driver-assistance functions: it autonomously regulates the speed of the
+ego vehicle in order to keep a safe, time-dependent distance from a
+detected preceding vehicle. The European standard
+ISO~15622:2018 specifies the minimum set of Key Performance Indicators
+(KPIs) that a Type~I ACC system must satisfy in terms of operating
+speed, automatic acceleration and deceleration, and jerk. This project
+designs and validates an ACC controller compliant with that standard
+on a full nonlinear longitudinal vehicle simulator.
+
+The vehicle plant is a complete powertrain model that accepts the
+normalised accelerator pedal $h_a\in[0,1]$ and the normalised brake
+pedal $h_b\in[0,1]$ as inputs and returns the time histories of the
+longitudinal speed $v$, longitudinal acceleration $\dot v$ and travelled
+distance $x$. Since the high-level ACC controller naturally generates
+a target longitudinal acceleration $a_\text{target}$, a low-level layer
+is needed to convert $a_\text{target}$ into the pair $(h_a,h_b)$. The
+project is therefore organised in three steps:
+\begin{itemize}
+    \item \textbf{Step 1 -- Plant inversion only.} The simplified
+          longitudinal dynamic equation is inverted analytically and
+          implemented as a feed-forward function
+          (\texttt{inverse\_pedals}). The first simulation uses this
+          function as the sole low-level controller.
+    \item \textbf{Step 2 -- Augmenting the inversion with a PI loop.}
+          The plant-model mismatch causes a steady-state drift in the
+          acceleration tracking. A PI controller is added on the
+          acceleration error to recover zero-error tracking.
+    \item \textbf{Step 3 -- Compliance verification.} The augmented
+          ACC is tested against two distinct lead-vehicle speed
+          profiles, one mild and one aggressive, in dry road
+          conditions; the ISO~15622:2018 KPIs are enforced by a
+          dedicated block in series with the ACC output.
+\end{itemize}
+
+Throughout the project the vehicle parameters of Genta Vol.\,2,
+Appendix~E.1 (saloon configuration) are used. The most relevant ones
+are summarised in Table~\ref{tab:params_p3}.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lcl}
+        \toprule
+        \textbf{Symbol} & \textbf{Value} & \textbf{Description} \\
+        \midrule
+        $m$         & $1020$\,kg               & Vehicle mass \\
+        $R_e$       & $0.279$\,m               & Rolling radius \\
+        $T_{e,\max}$& $105$\,N\,m              & Max engine torque \\
+        $T_{b,\max}$& $300$\,N\,m              & Max front braking torque \\
+        $K_b$       & $2.3$                    & Brake bias ratio (70/30) \\
+        $\eta_t$    & $0.93$                   & Driveline efficiency \\
+        $\tau_f$    & $1/3.438$                & Final drive ratio \\
+        $J_e,J_t,J_w$&$0.088,\,0.05,\,0.59$\,kg\,m$^2$ & Engine, trans., wheel inertia \\
+        $S$         & $2.04$\,m$^2$            & Frontal area \\
+        $C_x,C_z$   & $0.33,\,0.20$            & Drag / lift coefficients \\
+        $f_0$       & $0.011$                  & Rolling resistance constant \\
+        $K$         & $2.6\!\times\!10^{-8}$\,s$^2$/m$^2$ & Speed-dependent rolling term \\
+        \bottomrule
+    \end{tabular}
+    \caption{Vehicle parameters used in Project~3 (saloon set).}
+    \label{tab:params_p3}
+\end{table}
+
+%======================================================================
+\section{Theoretical Background}
+\label{sec:theory_p3}
+%======================================================================
+
+\subsection{Longitudinal vehicle model and its inversion}
+The simplified longitudinal dynamics of the vehicle, lumped on a single
+equivalent mass $m_e$, reads
+\begin{equation}
+    m_e\,\dot v =
+        \underbrace{\frac{T_{e,\max}\,\eta_g\,\eta_t}{R_e\,\tau_g\,\tau_f}}_{F_{a,\max}(\tau_g)}\,h_a
+        \;-\;
+        \underbrace{\frac{T_{b,\max}}{R_e}\!\left(1+\tfrac{1}{K_b}\right)}_{F_{b,\max}}\,h_b
+        \;-\;
+        \bigl(A + B\,v^{2} + C\,v^{4}\bigr),
+        \label{eq:long_dyn}
+\end{equation}
+where the equivalent mass
+\begin{equation}
+    m_e = m + \frac{4 J_w}{R_e^2} + \frac{J_t}{R_e^2 \tau_f^2} +
+          \frac{J_e}{R_e^2\,\tau_g^2\,\tau_f^2}
+    \label{eq:meq}
+\end{equation}
+accounts for the rotational inertia of wheels, transmission and
+engine, and the rolling/aerodynamic resistance coefficients are
+\begin{equation}
+    A = m g\,f_0,\qquad
+    B = m g K + \tfrac{1}{2}\rho S\,(C_x - C_z f_0),\qquad
+    C = -\tfrac{1}{2}\rho S K C_z.
+    \label{eq:resistance_p3}
+\end{equation}
+
+Equation~\eqref{eq:long_dyn} can be rewritten in compact form as
+$\dot v = f(v,\tau_g,h_a,h_b)$. Imposing $\dot v\equiv a_\text{target}$
+gives the inversion law that the low-level controller must implement:
+the required wheel force is
+\begin{equation}
+    F_\text{req}(v,a_\text{target},\tau_g)
+        = m_e\,a_\text{target} + A + B v^2 + C v^4,
+    \label{eq:Freq}
+\end{equation}
+and a positive value is delivered through the throttle ($h_b=0$),
+\begin{equation}
+    h_a = \frac{F_\text{req}}{F_{a,\max}(\tau_g)}
+        = \frac{R_e\,\tau_g\,\tau_f}{T_{e,\max}\,\eta_g\,\eta_t}\;
+          F_\text{req},
+    \label{eq:ha}
+\end{equation}
+whereas a negative value triggers the brake ($h_a=0$),
+\begin{equation}
+    h_b = \frac{-F_\text{req}}{F_{b,\max}}
+        = \frac{-R_e\,F_\text{req}}{T_{b,\max}\bigl(1+1/K_b\bigr)}.
+    \label{eq:hb}
+\end{equation}
+Because $h_a,h_b\in[0,1]$ are mutually exclusive (no throttle and brake
+overlap is allowed) and the engine cannot push the wheels backwards,
+the sign of $F_\text{req}$ uniquely selects the active pedal.
+
+\subsection{Constant Time-Gap (CTG) policy}
+The high-level ACC computes $a_\text{target}$ from the relative
+distance and speed with respect to the preceding vehicle. The desired
+inter-vehicle distance is proportional to the ego speed:
+\begin{equation}
+    L_\text{des}(v) = h\,v,
+    \label{eq:Ldes}
+\end{equation}
+with $h$ the design time-gap (here $h=2.7$\,s). Defining the spacing
+error
+\begin{equation}
+    \varepsilon = (x_l - x_e) - L_\text{des}(v_e)
+                = (x_l - x_e) - h\,v_e,
+    \label{eq:eps}
+\end{equation}
+its derivative $\dot\varepsilon = (v_l - v_e) - h\,a_e$ contains both
+the velocity mismatch and the ego acceleration. The control law adopted
+in the project is the classical CTG PD law
+\begin{equation}
+    a_\text{target} = -\frac{1}{h}\bigl(\lambda\,\varepsilon + \dot\varepsilon\bigr),
+    \label{eq:CTG}
+\end{equation}
+where $\lambda = 0.8$ is the spacing-error gain. Equation~\eqref{eq:CTG}
+combines proportional action on the position error with derivative
+action on the velocity mismatch, and the prefactor $1/h$ guarantees the
+correct dimensional scaling.
+
+A minimum-set-speed switch is added before computing $L_\text{des}$:
+if the ego is travelling below $v_\text{set,min}=7$\,m/s, the formula
+uses $v_\text{set,min}$ instead of $v_e$, in compliance with the ISO
+requirement on the minimum set speed.
+
+\subsection{ISO 15622:2018 KPIs}
+The standard prescribes five quantitative limits on the ACC behaviour,
+listed in Table~\ref{tab:iso}. They are enforced downstream of the
+CTG block (see Section~\ref{sec:simulink}).
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lc}
+        \toprule
+        \textbf{KPI} & \textbf{Limit} \\
+        \midrule
+        Min. operating speed for automatic acceleration & $v_\text{min,acc} = 5$\,m/s \\
+        Minimum set speed                               & $v_\text{set,min} = 7$\,m/s \\
+        Max. average deceleration (2\,s window)         & $3.5$\,m/s$^2$ \\
+        Max. deceleration rate (negative jerk, 1\,s)    & $2.5$\,m/s$^3$ \\
+        Max. automatic acceleration                     & $2.0$\,m/s$^2$ \\
+        \bottomrule
+    \end{tabular}
+    \caption{Key Performance Indicators imposed by ISO~15622:2018.}
+    \label{tab:iso}
+\end{table}
+
+%======================================================================
+\section{Simulink Implementation}
+\label{sec:simulink}
+%======================================================================
+
+\subsection{Overall architecture}
+The full simulator is implemented in \texttt{DASD\_B\_Project\_3.slx}
+and is illustrated in Figure~\ref{fig:sim_full}. The signal flow, from
+left to right, is the following:
+\begin{enumerate}
+    \item the \textbf{Lead Vehicle} block plays back a speed profile
+          and exports the leader bus $[x_l,\,v_l]$;
+    \item the \textbf{ACC Controller} reads the leader bus together
+          with the ego bus $[x_e,\,v_e]$ and computes
+          $a_\text{target}$ according to the CTG law~\eqref{eq:CTG};
+    \item the \textbf{ISO 15622:2018} block clamps and slope-limits
+          $a_\text{target}$ to satisfy the standard KPIs;
+    \item the PI controller (Section~\ref{sec:pi}) compensates for the
+          residual acceleration error and feeds the inverse-pedals
+          function;
+    \item the \textbf{Ego Vehicle} block (the full powertrain
+          simulator) integrates the longitudinal dynamics under the
+          pedal commands $(h_a,h_b)$ and returns the ego bus.
+\end{enumerate}
+A stop condition triggers when the time gap becomes negative
+(\texttt{<=0} block fed to a \texttt{STOP}), to flag any collision
+between ego and leader.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_project3/simulink_full.png}
+    \caption{Top-level architecture of the Project~3 Simulink model.}
+    \label{fig:sim_full}
+\end{figure}
+
+\subsection{ACC controller block}
+The internal structure of the ACC controller is shown in
+Figure~\ref{fig:sim_acc}. The preceding bus is demultiplexed into
+$x_l$ (sent to \texttt{out.x\_leader}) and $v_l$ (sent to
+\texttt{out.v\_leader}); the ego bus is demultiplexed into $x_e$ and
+$v_e$. The block in the top-right corner performs the minimum-set-speed
+switch
+$
+    v_\star = \max\bigl(v_e,\,v_\text{set,min}\bigr),
+$
+multiplied by $h$ to produce the desired headway $L_\text{des}$. The
+spacing error $\varepsilon = (x_l - x_e) - L_\text{des}$ is built by
+two summing junctions, differentiated by a $\Delta u/\Delta t$ block
+to obtain $\dot\varepsilon$, scaled by $\lambda$ and finally combined
+through the $-1/h$ gain as prescribed by~\eqref{eq:CTG}. The time gap
+$t_\text{gap} = (x_l - x_e)/v_e$ is computed separately and exported
+for plotting purposes.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_project3/sim_acc_controller.png}
+    \caption{ACC controller block: CTG policy with minimum-set-speed
+    switch and time-gap output.}
+    \label{fig:sim_acc}
+\end{figure}
+
+\subsection{ISO 15622:2018 enforcement block}
+Figure~\ref{fig:sim_iso} shows the post-processing chain that turns
+the raw $a_\text{target}$ into a standard-compliant signal:
+\begin{itemize}
+    \item the leftmost switch tests $v_e > 5$\,m/s; when the ego is
+          below the threshold, $a_\text{target}$ is forced to
+          $\min(a_\text{target},0)$, preventing the system from
+          requesting automatic positive acceleration below the
+          operating-speed limit;
+    \item the FIR filter implements a $2$-second moving average of
+          $a_\text{target}$, used by the subsequent comparator: if the
+          averaged deceleration falls below $-3.5$\,m/s$^2$, the
+          switch substitutes the filtered (saturated) value for the
+          raw command, preserving the standard limit;
+    \item the \textbf{Jerk Rate Limiter} bounds $|\dot a|$ by
+          $2.5$\,m/s$^3$;
+    \item a final saturation block at $[-3.5,\,+2.0]$\,m/s$^2$ closes
+          the chain.
+\end{itemize}
+Together these four operations cover all the ISO~15622:2018 KPIs of
+Table~\ref{tab:iso}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{images_project3/sim_ISO.png}
+    \caption{ISO 15622:2018 enforcement block: minimum-speed gate,
+    FIR-based deceleration limit, jerk limiter and final saturation.}
+    \label{fig:sim_iso}
+\end{figure}
+
+\subsection{Plant-inversion low-level controller}
+The low-level controller is implemented as the MATLAB Function
+\texttt{inverse\_pedals} that returns $(h_a,h_b)$ from the triplet
+$(a_\text{target},\,v,\,\tau_g)$. The traction/braking selection
+follows directly from the sign of $F_\text{req}$ of~\eqref{eq:Freq}:
+\begin{lstlisting}
+F_res     = A + B*v^2 + C*v^4;
+F_req     = me*a_target + F_res;
+F_mot_max = (Te_max*eta_g*eta_t)/(Re*tau_g*tau_t);
+F_brk_max = (Tb_max/Re)*(1 + 1/Kb);
+
+if F_req > 0          % traction phase
+    ha =  F_req / F_mot_max;
+    hb =  0;
+else                  % braking phase
+    ha =  0;
+    hb = -F_req / F_brk_max;
+end
+\end{lstlisting}
+The function is purely feed-forward: it inverts the simplified
+model~\eqref{eq:long_dyn} under the assumption that the lumped
+parameters $(m_e,A,B,C,T_{e,\max},T_{b,\max},\ldots)$ used in the
+inversion coincide with those of the full simulator. As shown in
+Section~\ref{sec:res_function}, this assumption is not exactly
+verified, which generates a steady-state acceleration drift.
+
+\subsection{Augmenting the inversion with a PI controller}
+\label{sec:pi}
+A PI loop is wrapped around the acceleration error
+$e_a = a_\text{target} - \dot v$ to compensate for the residual
+plant-model mismatch. Its transfer function is
+\begin{equation}
+    C_\text{PI}(s) = P + \frac{I}{s},\qquad
+    P = k_p = \tfrac{1}{3},\qquad
+    I = \frac{k_p}{\tau_\text{virtual}} = \frac{1/3}{0.2} = \tfrac{5}{3},
+    \label{eq:PI}
+\end{equation}
+with $\tau_\text{virtual}=0.2$\,s the desired closed-loop time
+constant. The PI output is added to $a_\text{target}$ before the
+inverse-pedals function: the integral channel removes the steady-state
+bias, while the proportional channel keeps the transient response of
+the inversion. The control parameters are summarised in
+Table~\ref{tab:acc_params}.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lcl}
+        \toprule
+        \textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+        \midrule
+        $h$                & $2.7$\,s             & Design time gap \\
+        $\lambda$          & $0.8$                & CTG spacing-error gain \\
+        $a_\text{max,acc}$ & $+2.0$\,m/s$^2$      & ISO max acceleration \\
+        $a_\text{max,dec}$ & $-3.5$\,m/s$^2$      & ISO max deceleration \\
+        $\dot a_\text{max}$& $-2.5$\,m/s$^3$      & ISO max neg. jerk \\
+        $v_\text{min,acc}$ & $5$\,m/s             & ISO min op. speed \\
+        $v_\text{set,min}$ & $7$\,m/s             & ISO min set speed \\
+        $k_p$              & $1/3$                & PI proportional gain \\
+        $\tau_\text{virtual}$ & $0.2$\,s          & PI virtual time constant \\
+        \bottomrule
+    \end{tabular}
+    \caption{ACC and low-level controller design parameters.}
+    \label{tab:acc_params}
+\end{table}
+
+%======================================================================
+\section{Simulation Results}
+%======================================================================
+All the simulations are run on the saloon configuration (vehicle
+choice 1) in dry conditions ($\mu = \mu_\text{dry}$). The ego is
+initialised with $v_0 = 30$\,m/s and the leader $100$\,m ahead, in
+third gear; the integration step is $T_s = 10$\,ms.
+
+%----------------------------------------------------------------------
+\subsection{Step 1 -- Plant-inversion only (\texttt{inverse\_pedals})}
+\label{sec:res_function}
+%----------------------------------------------------------------------
+In the first simulation the PI loop is disabled and the inverse-pedals
+function is used as the sole low-level controller. The lead vehicle
+follows the aggressive speed profile of Figure~\ref{fig:prof2_speed}
+(see Section~\ref{sec:res_prof2} for the profile itself). The ACC
+results are shown in Figures~\ref{fig:func_metrics},
+\ref{fig:func_leader} and~\ref{fig:func_inputs}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/function_ACC Metrics.png}
+    \caption{Step~1 (plant inversion only): ACC metrics. Top:
+    commanded vs.\ actual acceleration. Middle: acceleration tracking
+    error. Bottom: time gap (target $h = 2.7$\,s).}
+    \label{fig:func_metrics}
+\end{figure}
+
+The top panel of Figure~\ref{fig:func_metrics} reveals the issue: the
+\emph{actual} acceleration (green) stays systematically \emph{below}
+the commanded one (blue) by roughly $0.3$\,m/s$^2$ throughout the run.
+The middle panel quantifies the bias: the acceleration error oscillates
+around $+0.2\,\div\,+0.4$\,m/s$^2$ for the entire simulation, with
+positive transients up to $0.7$\,m/s$^2$ in correspondence with the
+fastest speed transitions of the leader. The cause is the plant-model
+mismatch between the analytical model used in the inversion
+\eqref{eq:long_dyn} and the full Simulink simulator: the simplified
+expression neglects, among others, the transmission-shifting
+dynamics, the clutch slip, the engine-torque map non-linearities and
+the wheel-slip contribution to the propulsive force. The cumulative
+effect is a deterministic bias on $\dot v$ that the feed-forward
+controller, by construction, cannot remove.
+
+Despite the bias, the time gap (bottom panel) stays remarkably close
+to the target $h = 2.7$\,s -- the CTG outer loop progressively
+absorbs the acceleration mismatch by adjusting the spacing. The
+follower position thus remains close to the desired one
+(Figure~\ref{fig:func_leader}), although the speed traces show a
+visible delay of the ego with respect to the leader, particularly in
+the high-acceleration intervals around $t = 60$\,s and $t = 150$\,s.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/function_Leader vs Follower.png}
+    \caption{Step~1 (plant inversion only): leader vs.\ ego trajectory
+    (top) and speed (bottom) over the $200$\,s horizon.}
+    \label{fig:func_leader}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/function_Vehicle Control Inputs.png}
+    \caption{Step~1 (plant inversion only): pedal commands. Brake
+    $h_b$ (top) and throttle $h_a$ (bottom). The initial brake spike
+    occurs while the ego decelerates from $30$\,m/s to the
+    leader-matched cruise speed.}
+    \label{fig:func_inputs}
+\end{figure}
+
+The pedal traces in Figure~\ref{fig:func_inputs} confirm that the
+function output is well-behaved -- a short initial brake intervention
+during the catch-up transient, followed by an almost-throttle-only
+regime -- but the persistent acceleration bias suggests that an
+integral action is required to drive the steady-state error to zero.
+This motivates Step~2 of the project.
+
+%----------------------------------------------------------------------
+\subsection{Step 2 -- PI-augmented control, Profile 1 (mild)}
+\label{sec:res_prof1}
+%----------------------------------------------------------------------
+The PI controller of equation~\eqref{eq:PI} is now enabled and the
+lead vehicle plays back a mild speed profile, oscillating in the
+$14\,\div\,16.5$\,m/s range (Figure~\ref{fig:prof1_speed}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/speed_profile1.png}
+    \caption{Speed profile~1: mild urban-like trace, $v_l \in
+    [14,\,16.5]$\,m/s over $200$\,s.}
+    \label{fig:prof1_speed}
+\end{figure}
+
+The initial transient is reported in Figure~\ref{fig:prof1_init}. The
+ego starts at $30$\,m/s while the leader cruises near $15$\,m/s, so
+the ACC must decelerate aggressively. The commanded acceleration
+saturates at $-3.5$\,m/s$^2$ for about $5$\,s (top panel), exactly the
+ISO~15622 lower bound, and is held there by the FIR-filter switch of
+the ISO block. After the speed catches up, around $t = 8$\,s, the
+commanded acceleration jumps to $+2$\,m/s$^2$ -- again the ISO upper
+limit -- to recover the time gap, which had collapsed to $\sim 1.3$\,s
+(bottom panel) during the catch-up. The PI loop is unable to fully
+follow the saturated commands during the transient: the acceleration
+error peaks at $5$\,m/s$^2$ around $t = 9$\,s when the commanded
+acceleration changes sign. The transient is over by $t \approx 25$\,s
+and the time gap converges to the target $2.7$\,s.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/prof1_beginning_metrics.png}
+    \caption{Profile~1, transient phase ($0\le t\le 31$\,s):
+    saturation of $a_\text{target}$ at the ISO limits, large
+    acceleration error during the sign reversal at $t\approx 9$\,s
+    and time-gap recovery to $2.7$\,s.}
+    \label{fig:prof1_init}
+\end{figure}
+
+In the steady-state regime, the PI action delivers practically perfect
+acceleration tracking. Figure~\ref{fig:prof1_ss} zooms on a one-second
+window around $t = 70$\,s: the acceleration error is bounded within
+$\pm 0.02$\,m/s$^2$ -- one order of magnitude smaller than the residual
+drift of Step~1 -- and the time gap is indistinguishable from the
+target trace. This is the key qualitative result of the project: the
+integral channel of the PI eliminates the steady-state bias that the
+pure inversion of Step~1 could not handle.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/prof1_steady-state ACC Metrics.png}
+    \caption{Profile~1, steady-state window ($t\approx 70$\,s):
+    acceleration error confined within $\pm 0.02$\,m/s$^2$ and time
+    gap perfectly aligned with the target $h = 2.7$\,s.}
+    \label{fig:prof1_ss}
+\end{figure}
+
+The leader-vs.-follower comparison in Figure~\ref{fig:prof1_leader} is
+restricted to the steady-state portion of the run ($t\ge 50$\,s) to
+avoid the spurious large initial gap. The ego speed (red) tracks the
+leader speed (cyan) with a barely visible delay; the position curves
+are essentially parallel, with the constant spacing dictated by the
+CTG policy.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/prof1_Leader vs Follower.png}
+    \caption{Profile~1, $t\ge 50$\,s: ego-vs.-leader position (top)
+    and speed (bottom). The constant-headway separation is maintained
+    throughout.}
+    \label{fig:prof1_leader}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/prof1_Vehicle Control Inputs.png}
+    \caption{Profile~1: pedal commands. A single full-brake event at
+    $t\approx 3$\,s ($h_b\to 1$) is followed by an almost-throttle-only
+    operation, with $h_a$ oscillating around $0.3$.}
+    \label{fig:prof1_inputs}
+\end{figure}
+
+The pedal traces (Figure~\ref{fig:prof1_inputs}) confirm a comfortable
+operating regime: after the initial full-brake event the throttle
+oscillates between $0.2$ and $0.5$, well inside the actuator range,
+and the brake stays at zero except for occasional micro-pulses at
+$t\approx 22$\,s.
+
+%----------------------------------------------------------------------
+\subsection{Step 2 -- PI-augmented control, Profile 2 (aggressive)}
+\label{sec:res_prof2}
+%----------------------------------------------------------------------
+The second test exercises a more demanding scenario: the leader speed
+ramps from $\sim 15$\,m/s to $\sim 28$\,m/s and back, covering both
+urban and extra-urban regimes (Figure~\ref{fig:prof2_speed}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/speed_profile2.png}
+    \caption{Speed profile~2: aggressive trace, $v_l \in
+    [13,\,28]$\,m/s over $200$\,s.}
+    \label{fig:prof2_speed}
+\end{figure}
+
+Figure~\ref{fig:prof2_metrics} reports the ACC metrics on the
+steady-state window. The commanded acceleration (blue) oscillates in
+the $-0.5\,\div\,+1.0$\,m/s$^2$ range, well inside the ISO bounds,
+following the speed fluctuations of the leader. The actual
+acceleration (green) sticks to the command with a worst-case error
+$|e_a|\le 0.3$\,m/s$^2$, and the steady error is centred on zero --
+i.e.\ no bias, in contrast with Step~1. The time gap stays within
+$\pm 0.05$\,s of the target, with the largest deviations occurring at
+the strongest acceleration ramps (around $t = 70$\,s and $t = 88$\,s).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/prof2_ACC Metrics.png}
+    \caption{Profile~2, steady-state window ($65\le t\le 140$\,s):
+    acceleration tracking and time-gap regulation under the
+    aggressive leader profile.}
+    \label{fig:prof2_metrics}
+\end{figure}
+
+The leader-vs.-follower comparison (Figure~\ref{fig:prof2_leader})
+shows that the ego closely follows the leader through the whole speed
+envelope, with a marginally larger phase delay during the high-speed
+plateau ($120\,\div\,160$\,s, $v_l\approx 27$\,m/s). The pedal traces
+(Figure~\ref{fig:prof2_inputs}) reflect the higher dynamic demand:
+several throttle saturations at $h_a = 1$ occur during the
+acceleration phases (the controller asks for $+2$\,m/s$^2$ but the
+engine cannot deliver more in the current gear), while the brake
+intervenes only sporadically with peaks below $0.05$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/prof2_Leader vs Follower.png}
+    \caption{Profile~2: ego-vs.-leader position (top) and speed
+    (bottom). The vehicle tracks the leader through the full
+    $13\,\div\,28$\,m/s range.}
+    \label{fig:prof2_leader}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{images_project3/prof2_Vehicle Control Inputs.png}
+    \caption{Profile~2: pedal commands. The throttle saturates at
+    $h_a = 1$ during the acceleration phases, while the brake stays
+    near zero apart from short micro-pulses.}
+    \label{fig:prof2_inputs}
+\end{figure}
+
+The aggressive scenario thus confirms the conclusions drawn on
+Profile~1: the PI-augmented controller delivers zero-bias acceleration
+tracking and tight headway regulation across a wide speed range, all
+while respecting the ISO~15622:2018 KPIs enforced by the dedicated
+Simulink block.
+
+%======================================================================
+\section{Benchmark}
+\label{sec:bench_p3}
+%======================================================================
+Table~\ref{tab:bench_p3} summarises the quantitative comparison of the
+three simulated scenarios. The figures are read directly from the
+time histories of $e_a(t)$, $t_\text{gap}(t)$ and the pedal commands,
+with the steady-state window starting at $t\ge 50$\,s for all the
+profiles. ``ISO'' columns report whether each KPI of
+Table~\ref{tab:iso} is satisfied throughout the simulation.
+
+\begin{table}[H]
+    \centering
+    \footnotesize
+    \begin{tabular}{lccccc}
+        \toprule
+        \textbf{Scenario} &
+        \textbf{$|e_a|_\text{ss}$} &
+        \textbf{$|t_\text{gap}-h|_\text{ss}$} &
+        \textbf{Max $|\dot v|$} &
+        \textbf{ISO compl.} &
+        \textbf{Behaviour} \\
+        \midrule
+        Step~1 -- inversion only, aggr.\ prof.\ &
+            $0.20\,\div\,0.40$\,m/s$^2$ & $<0.1$\,s & $\le 2.0$\,m/s$^2$ &
+            yes & biased, $\dot v < a_\text{target}$ \\
+        Step~2 -- PI, Profile~1 (mild) &
+            $<0.02$\,m/s$^2$ & $<0.02$\,s & $\le 3.5$\,m/s$^2$ &
+            yes & best tracking, no bias \\
+        Step~2 -- PI, Profile~2 (aggressive) &
+            $<0.30$\,m/s$^2$ & $<0.05$\,s & $\le 2.0$\,m/s$^2$ &
+            yes & robust, throttle saturated in $\dot v_+$ ramps \\
+        \bottomrule
+    \end{tabular}
+    \caption{Benchmark of the three ACC simulations. Steady-state
+    figures are evaluated for $t\ge 50$\,s; the transient catch-up
+    region is excluded.}
+    \label{tab:bench_p3}
+\end{table}
+
+Three observations stand out:
+\begin{itemize}
+    \item The pure plant-inversion controller of Step~1 is
+          intrinsically biased. The acceleration error of $\approx
+          0.3$\,m/s$^2$ stems from the mismatch between the simplified
+          model used in the inversion and the full simulator
+          (transmission, clutch, engine-map non-linearities) and
+          cannot be eliminated by retuning the feed-forward gains.
+    \item Adding a PI loop on the acceleration error -- with the
+          virtual-time-constant tuning $P = k_p,\,I = k_p/\tau_v$ --
+          completely removes the steady-state drift and reduces the
+          tracking error by more than one order of magnitude.
+    \item Compliance with ISO~15622:2018 is guaranteed by the
+          dedicated post-processing block (minimum-speed gate, FIR
+          deceleration filter, jerk limiter, final saturation) in
+          every scenario, including the most demanding accelerations
+          of Profile~2 where the upstream CTG law would otherwise
+          ask for $|\dot v|>2$\,m/s$^2$.
+\end{itemize}
+
+%======================================================================
+\section{Conclusions}
+%======================================================================
+The project addressed the design of a full ACC stack on a nonlinear
+longitudinal vehicle simulator, starting from the high-level
+constant-time-gap law down to the pedal-level commands.
+\begin{itemize}
+    \item \textbf{High-level controller.} A classical CTG PD law on
+          the spacing error, with $h = 2.7$\,s and $\lambda = 0.8$,
+          regulates the inter-vehicle distance and delivers a target
+          acceleration that respects, by design, the steady-state
+          headway requirement.
+    \item \textbf{Low-level controller -- Step 1.} The analytical
+          inversion of the simplified longitudinal model is
+          straightforward and computationally cheap, but
+          plant-simulator mismatch generates a persistent $\approx
+          0.3$\,m/s$^2$ acceleration bias. The follower lags slightly
+          behind the leader and the closed-loop CTG action absorbs the
+          bias only through a small permanent spacing offset.
+    \item \textbf{Low-level controller -- Step 2.} Augmenting the
+          inversion with a PI loop on the acceleration error (tuned
+          via the virtual-time-constant rule, $\tau_v = 0.2$\,s)
+          removes the bias entirely. On the mild Profile~1 the
+          steady-state acceleration error drops below
+          $0.02$\,m/s$^2$, and on the aggressive Profile~2 it stays
+          below $0.30$\,m/s$^2$ even during the strongest
+          acceleration ramps, with the time gap permanently within
+          $\pm 0.05$\,s of the target.
+    \item \textbf{ISO 15622:2018 compliance.} A dedicated block
+          combining a minimum-speed gate, a $2$-second FIR filter on
+          the deceleration, a jerk rate limiter at
+          $2.5$\,m/s$^3$ and a final saturation at
+          $[-3.5,\,+2.0]$\,m/s$^2$ enforces all the five KPIs of the
+          standard, both in the transient and the steady-state
+          regions of the simulations.
+\end{itemize}
+
+The key methodological takeaway is that \emph{plant inversion alone
+is insufficient when a non-negligible plant-model mismatch is present}:
+the feed-forward action handles the bulk of the conversion from
+$a_\text{target}$ to $(h_a,h_b)$, but a complementary feedback term --
+here an integral action driven by the acceleration error -- is
+indispensable to achieve zero steady-state drift. A natural extension
+of this work is the introduction of an anti-windup logic on the PI
+integrator, which would speed up the recovery from the saturated
+acceleration commands observed at the beginning of every simulation
+(see Figure~\ref{fig:prof1_init}), and the adoption of a gain-scheduled
+PI whose proportional gain depends on the engaged gear, to better
+match the gear-dependent throttle authority that the current
+single-gain design only approximates.

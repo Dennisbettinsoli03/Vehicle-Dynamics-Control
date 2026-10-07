@@ -1,0 +1,761 @@
+% =====================================================================
+% Report content to be pasted INSIDE \begin{document} ... \end{document}
+%
+% Required packages in your Overleaf preamble:
+%   \usepackage{graphicx}
+%   \usepackage{amsmath, amssymb}
+%   \usepackage{float}        % for [H] figure placement
+%   \usepackage{booktabs}     % nice tables (\toprule, \midrule, \bottomrule)
+%   \usepackage{listings}     % code snippets
+%   \usepackage{xcolor}
+%   \usepackage{hyperref}     % cross-references
+%   \lstset{basicstyle=\ttfamily\footnotesize, breaklines=true,
+%           keywordstyle=\color{blue}, commentstyle=\color{gray!80!black},
+%           numbers=left, numberstyle=\tiny, stepnumber=1, frame=single,
+%           language=Matlab}
+%
+% Place the folder 'image_project4' (with sub-folders ex1, ex2, ex3 and
+% the file sim_general.png) next to your main.tex
+%
+% NOTE: three figures of Exercise 2 have a dot in the file name
+% (sigma_r_-0.1.png, ...). They are included with the {<name>}.png brace
+% trick so that graphicx parses the extension correctly.
+% =====================================================================
+
+\title{Anti-lock Braking System Design \\ \large Project 4 -- Driver Assistance System Design (01USHLO)}
+\author{Dennis Bettinsoli \\ Politecnico di Torino}
+\date{\today}
+\maketitle
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+The braking performance of a road vehicle is limited by the friction
+that the tyres can exchange with the road, which in turn depends
+strongly on the \emph{longitudinal slip} of each wheel. When the brake
+torque is too high the wheel decelerates faster than the vehicle, the
+slip grows, the wheel locks and two undesirable effects occur
+simultaneously: the available longitudinal force drops below its peak
+value and the lateral (cornering) force collapses, so the vehicle loses
+both deceleration capability and steerability. The purpose of an
+Anti-lock Braking System (ABS) is precisely to keep the slip close to
+the value that maximises the road friction, thus minimising the
+stopping distance while preserving directional control.
+
+This project is organised in three exercises, all built on the same
+longitudinal driveline/vehicle model implemented in Simulink:
+\begin{itemize}
+    \item \textbf{Exercise 1 -- Driveline model (braking).} Open-loop
+          braking manoeuvres from $80$\,km/h: the influence of the
+          brake command $h_b$ and of the front/rear brake ratio $K_b$
+          on the stopping distance, the sensitivity to vehicle mass and
+          drag coefficient in a $\pm15\%$ range, and the comparison
+          between a geared stop and a neutral-gear stop ($h_c=0$).
+    \item \textbf{Exercise 2 -- Slip-regulation ABS.} Design and tuning
+          of a closed-loop wheel-slip controller
+          ($\dot u = K_\mathrm{gain}\,\mathrm{sign}(\sigma_r-\sigma)$,
+          $T_\mathrm{brake}=\mathrm{sat}(u,0,T_b^{(f,r)})$): choice of
+          the reference slip $\sigma_r$, gain tuning for minimum
+          stopping distance, behaviour on a wet road and a discussion of
+          its practical feasibility.
+    \item \textbf{Exercise 3 -- Conjugate Boundary Method.} A
+          slip-free ABS based on a Stateflow state machine that
+          modulates the brake pressure using only the wheel
+          acceleration, tested on wet and snow surfaces.
+\end{itemize}
+
+The nominal vehicle parameters (front-wheel/rear-wheel drive selectable
+through the flag \texttt{Traction}) are summarised in
+Table~\ref{tab:params}; the initial speed is $V_0=80/3.6\approx
+22.2$\,m/s in every test.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lcl}
+        \toprule
+        \textbf{Symbol} & \textbf{Value} & \textbf{Description} \\
+        \midrule
+        $m$        & $1020$\,kg     & Nominal vehicle mass \\
+        $C_x$      & $0.33$         & Nominal drag coefficient \\
+        $a$        & $0.923$\,m     & Front axle -- c.o.g. distance \\
+        $b$        & $1.376$\,m     & Rear axle -- c.o.g. distance \\
+        $R_e$      & $0.279$\,m     & Effective rolling radius \\
+        $T_{b,\mathrm{tot}}$ & $3000$\,Nm & Total available brake torque \\
+        $V_0$      & $80$\,km/h     & Initial speed \\
+        $T_s$      & $1$\,ms        & Solver / discrete sample time \\
+        \bottomrule
+    \end{tabular}
+    \caption{Main vehicle parameters used throughout Project 4.}
+    \label{tab:params}
+\end{table}
+
+%======================================================================
+\section{Theoretical Background}
+\label{sec:theory}
+%======================================================================
+
+\paragraph{Longitudinal slip.}
+For a braked wheel the longitudinal slip is defined as
+\begin{equation}
+    \sigma = \frac{R_e\,\omega - V}{V},
+    \label{eq:slip}
+\end{equation}
+where $\omega$ is the wheel angular speed and $V$ the vehicle forward
+speed. During braking $R_e\omega < V$, hence $\sigma<0$; $\sigma=0$ is
+free rolling and $\sigma=-1$ is a fully locked wheel ($\omega=0$). This
+sign convention explains why all the reference slips and controller
+gains used in the code are negative.
+
+\paragraph{Friction curve.}
+The road force is modelled through a $\mu$--$\sigma$ characteristic
+(stored as a 1-D look-up table). The friction coefficient grows almost
+linearly with $|\sigma|$, reaches a peak $\mu_\mathrm{max}$ at an
+optimal slip $\sigma_p$ (typically $|\sigma_p|\approx0.1\!-\!0.2$ on
+dry asphalt, lower on wet/snow) and then \emph{decreases} towards the
+sliding value as $|\sigma|\to1$:
+\begin{equation}
+    F_x = \mu(\sigma)\,F_z .
+    \label{eq:fx}
+\end{equation}
+The ascending branch ($|\sigma|<|\sigma_p|$) is \emph{stable}: a small
+increase of slip raises the force that tends to spin the wheel back up.
+The descending branch ($|\sigma|>|\sigma_p|$) is \emph{unstable}: more
+slip means less force, the wheel decelerates further and runs away to
+lock. Any ABS must therefore keep the operating point on, or just
+below, the peak.
+
+\paragraph{Wheel and vehicle dynamics.}
+Each wheel obeys
+\begin{equation}
+    J_w\,\dot\omega = R_e\,F_x - T_\mathrm{brake},
+    \label{eq:wheel}
+\end{equation}
+while the longitudinal motion of the vehicle is governed by
+\begin{equation}
+    m\,\dot V = -\!\!\sum_{i} F_{x,i} - \tfrac12\rho\,C_x A\,V^2 - F_\mathrm{roll},
+    \label{eq:long}
+\end{equation}
+i.e. the sum of the four tyre forces plus the aerodynamic drag and the
+rolling resistance. Equation~\eqref{eq:long} shows that the mass scales
+the inertia (longer stop when heavier) whereas the drag coefficient
+only enters the aerodynamic term, which at $\le80$\,km/h is small
+compared with the braking forces.
+
+\paragraph{Brake distribution.}
+The total brake torque is split front/rear through the ratio $K_b$:
+\begin{equation}
+    T_{bf}^{\max} = \frac{T_{b,\mathrm{tot}}}{1+1/K_b}, \qquad
+    T_{br}^{\max} = \frac{T_{bf}^{\max}}{K_b},
+    \label{eq:Kb}
+\end{equation}
+and the instantaneous command is $T_\mathrm{brake}=h_b\,T_{b}^{\max}$
+with $h_b\in[0,1]$. During braking the load transfers forward, so the
+rear axle is lightly loaded and locks first; a larger $K_b$ (more front
+bias) is therefore safer, while a small $K_b$ promotes the
+directionally-unstable rear lock.
+
+%======================================================================
+\section{Exercise 1 -- Driveline Model (Braking)}
+%======================================================================
+
+\subsection*{Simulink implementation}
+The longitudinal model (Figure~\ref{fig:sim_general}) chains the
+\texttt{Engine + clutch}, \texttt{Gearbox} and \texttt{Differential}
+blocks into the \texttt{Wheel dynamics} subsystem, which integrates
+equation~\eqref{eq:wheel} for each wheel, evaluates the slip
+\eqref{eq:slip} and the tyre force \eqref{eq:fx} through the
+$\mu$--$\sigma$ table, and returns the longitudinal force $F_x$. The
+net force is divided by the mass and integrated twice
+(equation~\eqref{eq:long}) to obtain speed and travelled distance; a
+\texttt{STOP} block ends the run when the speed falls below
+$\approx1$\,m/s. The brake torque enters the wheel block scaled by
+$h_b$, and a switch (highlighted later in Figure~\ref{fig:wheel_model})
+selects between the fixed open-loop torque used here and the controller
+output used in Exercise 2.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{image_project4/sim_general.png}
+    \caption{Top-level longitudinal driveline/vehicle model used in
+    Exercise 1: engine--clutch--gearbox--differential feeding the wheel
+    dynamics, with double integration to speed and distance.}
+    \label{fig:sim_general}
+\end{figure}
+
+%----------------------------------------------------------------------
+\subsection{Effect of $h_b$ and $K_b$ on the stopping distance}
+%----------------------------------------------------------------------
+Two extreme calibrations are compared. The first
+(Figure~\ref{fig:hbkb1}) uses a gentle command $h_b=0.25$ with a strong
+front bias $K_b=2.33$ ($\approx70/30$); the second
+(Figure~\ref{fig:hbkb2}) uses a hard command $h_b=0.90$ with a more
+rearward split $K_b=1.7$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex1/h_b_K_b_stoppingDistance_1.png}
+    \caption{Gentle braking: $h_b=0.25$, $K_b=2.33$. Speed/distance
+    (top) and tyre slip (bottom).}
+    \label{fig:hbkb1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex1/h_b_K_b_stoppingDistance_2.png}
+    \caption{Hard braking: $h_b=0.90$, $K_b=1.7$. The four wheels lock
+    ($\sigma=-1$) within $0.1$\,s.}
+    \label{fig:hbkb2}
+\end{figure}
+
+With $h_b=0.25$ the deceleration is mild: the slip of all wheels stays
+close to zero (only a brief rear-right excursion to $\approx-0.45$ near
+the end, when the speed is low and the same torque produces more slip),
+the vehicle does not even come to a complete stop within the
+$4$\,s horizon and the travelled distance reaches
+$\approx47$\,m. With $h_b=0.90$ the brake torque immediately exceeds
+the grip of every tyre: all four slips saturate at $\sigma=-1$ in less
+than $0.1$\,s and stay locked until the vehicle stops at
+$\approx35$\,m in $\approx3.05$\,s.
+
+The two cases summarise the role of the two parameters:
+\begin{itemize}
+    \item \textbf{$h_b$} sets the magnitude of the brake torque, hence
+          the deceleration. Increasing $h_b$ shortens the stopping
+          distance, \emph{but only until the wheels lock}: beyond the
+          lock threshold the slip saturates at $-1$ and any further
+          increase of $h_b$ is useless. The shorter distance of the
+          hard stop ($35$ vs $47$\,m) is obtained at the price of fully
+          locked wheels -- i.e. zero steering authority and operation on
+          the descending (low-$\mu$) branch of the friction curve,
+          which on a real road would also lengthen the stop and cause
+          loss of control.
+    \item \textbf{$K_b$} sets the front/rear distribution
+          (equation~\eqref{eq:Kb}). A larger $K_b$ moves torque to the
+          (more loaded) front axle and protects the rear from locking;
+          the smaller $K_b=1.7$ of the second case sends comparatively
+          more torque to the unloaded rear axle and contributes to the
+          simultaneous lock.
+\end{itemize}
+The ideal stop would keep $\sigma$ at the friction peak on every wheel
+-- which is exactly what the ABS of Exercises 2 and 3 automates.
+
+%----------------------------------------------------------------------
+\subsection{Sensitivity to vehicle mass and drag coefficient ($\pm15\%$)}
+%----------------------------------------------------------------------
+Keeping a fixed calibration ($h_b=0.45$, $K_b=2.33$) the mass and the
+drag coefficient are perturbed together by $\pm15\%$ around their
+nominal values ($m_0=1020$\,kg, $C_{x0}=0.33$). The heavy/high-drag
+configuration ($+15\%$: $m=1173$\,kg, $C_x=0.3795$) is shown in
+Figure~\ref{fig:mass1}, the light/low-drag one ($-15\%$, parameters at
+$0.85$ of nominal) in Figure~\ref{fig:mass2}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex1/vehicleMass_Cx_1.png}
+    \caption{Sensitivity, $+15\%$ case ($m=1173$\,kg, $C_x=0.3795$):
+    longer stop, rear axle locks at $\approx0.6$\,s.}
+    \label{fig:mass1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex1/vehicleMass_Cx_2.png}
+    \caption{Sensitivity, $-15\%$ case (mass and drag reduced to
+    $0.85$ of nominal): shorter stop, rear axle locks earlier
+    ($\approx0.45$\,s).}
+    \label{fig:mass2}
+\end{figure}
+
+In both cases the front wheels keep rolling at a small slip
+($\sigma\approx-0.1$) while the lightly-loaded rear axle reaches
+$\sigma=-1$. The trend with the parameters is clear and monotonic:
+\begin{itemize}
+    \item the heavy/high-drag vehicle stops in $\approx33$\,m
+          ($\approx2.9$\,s) and the rear locks at $\approx0.6$\,s;
+    \item the light/low-drag vehicle stops in $\approx30$\,m
+          ($\approx2.6$\,s) and the rear locks earlier, at
+          $\approx0.45$\,s.
+\end{itemize}
+A heavier vehicle therefore needs a longer distance, even though its
+higher $C_x$ adds aerodynamic drag: at these speeds the drag term in
+equation~\eqref{eq:long} is small, so the \emph{mass dominates} the
+sensitivity. The lighter vehicle, having less rear-axle load, reaches
+the rear-lock condition sooner. Overall a $\pm15\%$ parameter spread
+maps into roughly $\pm5\%$ of stopping distance around the nominal --
+a moderate but non-negligible sensitivity that any robust ABS tuning
+must tolerate.
+
+%----------------------------------------------------------------------
+\subsection{Geared stop versus neutral gear ($h_c=0$)}
+%----------------------------------------------------------------------
+Finally the same full-pedal stop ($h_b=1$, $K_b=2.33$, nominal vehicle)
+is run with the gear engaged ($h_c=1$, engine braking transmitted
+through the driveline) and in neutral ($h_c=0$, clutch disengaged, no
+engine braking). The two runs are overlaid in
+Figure~\ref{fig:neutral}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex1/neutral_gear.png}
+    \caption{Full-pedal stop ($h_b=1$): geared and neutral
+    speed/distance curves are practically superimposed
+    ($\approx35$\,m), because the wheels lock immediately.}
+    \label{fig:neutral}
+\end{figure}
+
+The speed and distance curves of the two configurations are practically
+indistinguishable: both stop at $\approx35$\,m in $\approx3.05$\,s and
+all wheels lock ($\sigma=-1$) within the first tenth of a second. The
+reason is physical: once a wheel is locked its angular speed is zero and
+its deceleration is set entirely by the tyre--road sliding friction,
+not by the driveline. Engine braking can add deceleration \emph{only
+while the driven (rear) wheels are still rolling}; under a hard,
+lock-up stop that contribution vanishes, so the gear has a negligible
+effect on the stopping distance. A measurable geared-vs-neutral
+difference would appear only with a gentler $h_b$ that keeps the wheels
+rolling, where engine braking on the rear axle would slightly increase
+the deceleration of the geared case.
+
+%======================================================================
+\section{Exercise 2 -- ABS Controller for Wheel-Slip Regulation}
+%======================================================================
+
+\subsection*{Controller implementation}
+The open-loop brake torque of Exercise 1 is replaced, on each wheel, by
+the closed-loop law requested in the assignment
+\begin{equation}
+    \dot u = K_\mathrm{gain}\,\mathrm{sign}(\sigma_r-\sigma), \qquad
+    T_\mathrm{brake} = \mathrm{sat}\!\left(u,\,0,\,T_b^{(f,r)}\right).
+    \label{eq:abs2}
+\end{equation}
+Inside the wheel subsystem (Figure~\ref{fig:wheel_model}) a switch
+selects, for each corner, the controller output instead of the fixed
+torque. The per-wheel signal chain (Figure~\ref{fig:wheel_chain})
+computes the static slip, passes it through a tyre
+\texttt{relaxation\_length} block, reads the friction from the
+$\mu$--$\sigma$ table and feeds the slip to the
+\texttt{wheel\_braking\_controller}. The controller itself
+(Figure~\ref{fig:controller}) is the literal block-diagram translation
+of equation~\eqref{eq:abs2}: the error $\sigma_r-\sigma$ enters a
+\texttt{sign} block, is multiplied by $K_\mathrm{gain}$, integrated by
+$1/s$ and clipped by a saturation to the admissible torque range
+$[0,\,T_b^{(f,r)}]$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{image_project4/ex2/simulink_of_theWheels_model.png}
+    \caption{Wheel dynamics with the brake-torque switch (highlighted):
+    open-loop torque $T_{bf}^{\max}h_b$ or controller output
+    $T_\mathrm{brake}$.}
+    \label{fig:wheel_model}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex2/simulink_wheel_brk_controller.png}
+    \caption{Per-wheel chain: static slip $\to$ relaxation length $\to$
+    $\mu$--$\sigma$ table, with the slip routed to the braking
+    controller.}
+    \label{fig:wheel_chain}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex2/wheel_barking_controller.png}
+    \caption{Wheel braking controller implementing
+    $\dot u=K_\mathrm{gain}\,\mathrm{sign}(\sigma_r-\sigma)$ followed by
+    the saturation $\mathrm{sat}(u,0,T_b^{(f,r)})$.}
+    \label{fig:controller}
+\end{figure}
+
+\paragraph{Sign of the gain.}
+With $\sigma,\sigma_r<0$, if the wheel is braking less than the target
+($\sigma>\sigma_r$) the error $\sigma_r-\sigma$ is negative, so a
+\emph{negative} $K_\mathrm{gain}$ produces $\dot u>0$, increases the
+brake torque and drives $\sigma$ towards $\sigma_r$. This is why the
+code uses $K_\mathrm{gain}=-600$ (and more negative values when tuning).
+
+%----------------------------------------------------------------------
+\subsection{Baseline run and slip analysis ($K_\mathrm{gain}=-600$)}
+%----------------------------------------------------------------------
+The baseline manoeuvre ($\sigma_r=-0.2$, $K_\mathrm{gain}=-600$,
+$h_b=0.35$, $K_b=2.33$) is reported in the $\sigma_r=-0.2$ panel of
+Figure~\ref{fig:sigma02}. The integral-of-sign law drives the regulated
+(rear) slip towards $-0.2$ and then holds it in a bounded
+\emph{limit-cycle} oscillation -- the steady-state signature of the
+relay (\texttt{sign}) nonlinearity. No wheel locks; the front wheels
+settle at a smaller slip ($\approx-0.05$) because the forward load
+transfer lets them carry the brake torque without reaching the target.
+The stopping distance is $\approx60$\,m in $\approx4.25$\,s: long,
+because with $K_\mathrm{gain}=-600$ the torque integrator ramps slowly
+and the average deceleration is modest. The gain is tuned in
+Section~5.3.
+
+%----------------------------------------------------------------------
+\subsection{Choice of the reference slip $\sigma_r$}
+%----------------------------------------------------------------------
+The reference slip is the operating point the ABS aims at on the
+$\mu$--$\sigma$ curve. The three values $\sigma_r=-0.1,\,-0.2,\,-0.3$
+(all with $K_\mathrm{gain}=-600$) are compared in
+Figures~\ref{fig:sigma01}--\ref{fig:sigma03}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{{image_project4/ex2/sigma_r_-0.1}.png}
+    \caption{$\sigma_r=-0.1$: slip stays shallow and smooth, but the
+    grip is under-used (operating point below the friction peak).}
+    \label{fig:sigma01}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{{image_project4/ex2/sigma_r_-0.2}.png}
+    \caption{$\sigma_r=-0.2$: the slip oscillates in a bounded limit
+    cycle around the target, close to the friction peak -- best
+    compromise.}
+    \label{fig:sigma02}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{{image_project4/ex2/sigma_r_-0.3}.png}
+    \caption{$\sigma_r=-0.3$: the target lies on the unstable branch;
+    the rear slip repeatedly dives to $-1$ (intermittent lock) and
+    recovers.}
+    \label{fig:sigma03}
+\end{figure}
+
+\begin{itemize}
+    \item \textbf{$\sigma_r=-0.1$} -- the target sits on the steep,
+          \emph{stable} part of the curve, well below the peak. The slip
+          is smooth and free of oscillation, but the friction
+          coefficient is not fully exploited, so the deceleration is
+          lower and the stop is the longest ($\approx61$\,m). It is the
+          safest but least efficient choice.
+    \item \textbf{$\sigma_r=-0.2$} -- the target is at/near the peak of
+          the friction curve. The slip oscillates in a small bounded
+          limit cycle around $-0.2$, the friction coefficient is close
+          to $\mu_\mathrm{max}$ and the stop is slightly shorter
+          ($\approx60$\,m) at the same gain. This is the best trade-off
+          between braking force and stability, which is why $-0.2$ is
+          selected.
+    \item \textbf{$\sigma_r=-0.3$} -- the target is \emph{beyond} the
+          peak, on the unstable descending branch
+          (Section~\ref{sec:theory}). As soon as the slip exceeds the
+          peak the friction drops, the wheel decelerates further and
+          runs away: the rear slip dives to $-1$ for sustained intervals
+          (around $t\approx2.4\!-\!3$\,s and again near $t\approx4.2$\,s)
+          before the controller manages to recover it. This intermittent
+          locking gives no distance benefit ($\approx61$\,m) while
+          losing braking force and steerability.
+\end{itemize}
+The slip trends confirm the rule: the reference must be placed at the
+friction peak; a smaller magnitude wastes grip, a larger one
+destabilises into locking.
+
+%----------------------------------------------------------------------
+\subsection{Gain tuning for minimum stopping distance}
+%----------------------------------------------------------------------
+Keeping $\sigma_r=-0.2$, the gain magnitude is increased so that the
+torque integrator reaches the regulating level sooner.
+Figure~\ref{fig:tune} shows the result for $K_\mathrm{gain}=-1450$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex2/tune_K_gain.png}
+    \caption{Tuned controller, $\sigma_r=-0.2$, $K_\mathrm{gain}=-1450$:
+    the stopping distance drops to $\approx46$\,m while the slip still
+    limit-cycles around the target without locking.}
+    \label{fig:tune}
+\end{figure}
+
+Raising $|K_\mathrm{gain}|$ from $600$ to $1450$ shortens the stop from
+$\approx60$\,m ($4.25$\,s) to $\approx46$\,m ($\approx3.5$\,s): the
+faster integrator builds the brake torque more quickly, so the wheels
+reach the high-friction slip region earlier. The slip keeps oscillating
+in a bounded cycle around $-0.2/-0.3$ but never locks. Increasing the
+gain further would enlarge the limit-cycle amplitude and risk
+overshooting past the friction peak into locking, so
+$K_\mathrm{gain}=-1450$ is a good practical minimum-distance setting on
+dry road.
+
+%----------------------------------------------------------------------
+\subsection{Wet-road conditions and re-tuning}
+%----------------------------------------------------------------------
+The $\mu$--$\sigma$ block is switched to the wet characteristic and the
+gain is re-tuned. Figure~\ref{fig:drywet} compares the dry calibration
+($K_\mathrm{gain}=-1450$) with the wet one ($K_\mathrm{gain}=-700$), at
+$h_b=0.5$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{image_project4/ex2/dry_vs_wet_road_conditions.png}
+    \caption{Dry (left, $K_\mathrm{gain}=-1450$) versus wet (right,
+    $K_\mathrm{gain}=-700$) braking with $\sigma_r=-0.2$: speed/distance
+    (top) and slip (bottom).}
+    \label{fig:drywet}
+\end{figure}
+
+Three observations follow:
+\begin{itemize}
+    \item \textbf{Distance.} The lower wet friction lengthens the stop
+          from $\approx39$\,m ($\approx3.0$\,s) on dry to
+          $\approx53$\,m ($\approx3.9$\,s) on wet -- the unavoidable
+          consequence of the reduced $\mu_\mathrm{max}$.
+    \item \textbf{Re-tuning is necessary.} With the aggressive dry gain
+          the dry slip already shows a \emph{growing} limit cycle
+          (bottom-left); on the lower-grip wet surface the same gain
+          would overshoot the (lower, sharper) friction peak even more
+          easily and drive the wheel towards locking. Reducing the gain
+          to $-700$ yields a well-damped slip that settles cleanly at
+          $\sigma_r=-0.2$ (bottom-right).
+    \item \textbf{Surface dependence.} The optimal gain is therefore
+          surface-dependent: a single fixed gain tuned on dry is too
+          aggressive on wet. This lack of robustness of the
+          fixed-gain slip controller motivates the threshold-based logic
+          of Exercise 3.
+\end{itemize}
+
+%----------------------------------------------------------------------
+\subsection{Feasibility on a real vehicle}
+%----------------------------------------------------------------------
+The controller of equation~\eqref{eq:abs2} regulates the slip
+$\sigma=(R_e\omega-V)/V$, which requires the true vehicle ground speed
+$V$. While the wheel speed $\omega$ is readily measured by wheel-speed
+sensors, $V$ is \emph{not} directly measurable precisely when it
+matters: during hard braking the wheels slip, so the wheel speed no
+longer equals the vehicle speed. Obtaining $V$ would need additional
+sensors (optical ground-speed sensor, GPS, inertial integration) or a
+dedicated state estimator, so the slip must be \emph{estimated} rather
+than measured. In addition, the \texttt{sign}-based law produces
+chattering -- continuous high-frequency brake modulation -- which
+stresses the hydraulic valves and degrades comfort.
+
+For these reasons this exact strategy cannot be installed as-is.
+Its practical relevance is nonetheless high: it defines the ideal
+control objective (hold the slip at the friction peak), it is a valuable
+reference/benchmark for simulation and Hardware-in-the-Loop testing, and
+it makes explicit why production ABS infers the wheel state from the
+wheel \emph{acceleration} instead of the slip -- which is exactly the
+approach of Exercise 3.
+
+%======================================================================
+\section{Exercise 3 -- ABS, Conjugate Boundary Method}
+%======================================================================
+
+\subsection*{Control logic and implementation}
+The conjugate-boundary ABS avoids any slip measurement and acts only on
+the wheel acceleration $\dot\omega$. It is implemented as the Stateflow
+machine of Figure~\ref{fig:stateflow}, embedded in the wiring of
+Figure~\ref{fig:ex3_sim}: the requested torque $T_\mathrm{req}=
+T_{bf}^{\max}h_b$, the wheel acceleration $\dot\omega$, the previous
+output (through a unit delay $1/z$, giving $T_\mathrm{in}$) and a
+\texttt{wheel\_lock} flag ($=1$ when $|\omega|<0.1$) feed the
+controller, whose output $T_\mathrm{out}$ drives the brake.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{image_project4/ex3/stateflow.png}
+    \caption{Stateflow machine: IDLE, RELEASE and REAPPLY with the
+    corresponding output-torque updates and transition guards.}
+    \label{fig:stateflow}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{image_project4/ex3/ex3_sim.png}
+    \caption{ABS-controller wiring: requested torque, wheel
+    acceleration $\dot\omega$, delayed torque $T_\mathrm{in}$ and the
+    wheel-lock flag drive the state machine.}
+    \label{fig:ex3_sim}
+\end{figure}
+
+The three states implement
+\begin{align}
+    \text{IDLE:} \quad   & T_\mathrm{out} = T_\mathrm{req}, \\
+    \text{RELEASE:} \quad & T_\mathrm{out}(k) = T_\mathrm{out}(k-1) - K_\mathrm{release}\,T_s, \\
+    \text{REAPPLY:} \quad & T_\mathrm{out}(k) = T_\mathrm{out}(k-1) + K_\mathrm{reapply}\,T_s,
+\end{align}
+with the guards
+\begin{itemize}
+    \item $\;\to$ \textbf{RELEASE} when $-\dot\omega > K_1$ (the wheel
+          decelerates too fast) \emph{or} \texttt{wheel\_lock};
+    \item RELEASE $\to$ \textbf{REAPPLY} when $\dot\omega > K_3$ (the
+          wheel spins back up) \emph{or} \texttt{after}$(K_2,\mathrm{sec})$
+          (time-out).
+\end{itemize}
+The system thus dumps brake pressure as soon as a skid is detected and
+rebuilds it -- more slowly -- once the wheel recovers, producing the
+characteristic saw-tooth pressure modulation that keeps the slip near
+the friction peak \emph{without ever computing it}. Following the
+assignment hints, the triggers are started from $K_1\approx K_3$, the
+charge/discharge rates are kept constant within each scenario, and
+$K_\mathrm{reapply}<K_\mathrm{release}$ to avoid chattering. The two
+surfaces use the settings of Table~\ref{tab:ex3par}.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Parameter} & \textbf{Wet} & \textbf{Snow} & \textbf{Unit} \\
+        \midrule
+        $K_1$ (accel.\ trigger) & $40$   & $40$   & m/s$^2$ \\
+        $K_3$ (decel.\ trigger) & $35$   & $35$   & m/s$^2$ \\
+        $K_2$ (max time RELEASE) & $0.06$ & $0.06$ & s \\
+        $K_\mathrm{release}$    & $4500$ & $5500$ & Nm/s \\
+        $K_\mathrm{reapply}$    & $500$  & $200$  & Nm/s \\
+        $h_b$ / $K_b$           & $0.6/1.8$ & $0.5/1.8$ & -- \\
+        \bottomrule
+    \end{tabular}
+    \caption{Conjugate-boundary ABS settings for the two surfaces.}
+    \label{tab:ex3par}
+\end{table}
+
+%----------------------------------------------------------------------
+\subsection{Wet-surface results}
+%----------------------------------------------------------------------
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex3/ex3_wet_slip.png}
+    \caption{Wet surface: speed/distance (top) and tyre slip (bottom).
+    The slip is held in the useful band after a brief initial spike.}
+    \label{fig:wet_slip}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex3/ex3_wet_torque.png}
+    \caption{Wet surface: brake-torque saw-tooth on the four wheels
+    (front $\sim$ up to $1100$\,Nm, rear $\sim$ up to $600$\,Nm).}
+    \label{fig:wet_torque}
+\end{figure}
+
+On the wet road the vehicle stops in $\approx4.6$\,s over
+$\approx45$\,m. After a short initial dip to $\sigma\approx-0.5$ -- the
+transient before the state machine catches the first skid -- the slip
+of every wheel is held in the useful band ($\approx-0.1$ to $-0.3$),
+oscillating around the friction peak instead of locking. The brake
+torque (Figure~\ref{fig:wet_torque}) shows the expected saw-tooth:
+a fast drop in RELEASE followed by a slower ramp in REAPPLY, repeated as
+a limit cycle; the more loaded front wheels carry the higher torque
+($\sim1100$\,Nm peak) than the rear ($\sim600$\,Nm).
+
+%----------------------------------------------------------------------
+\subsection{Snow-surface results}
+%----------------------------------------------------------------------
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex3/ex3_snow_slip.png}
+    \caption{Snow surface: speed/distance (top) and tyre slip (bottom).
+    Very long stop, slip still kept bounded by the modulation.}
+    \label{fig:snow_slip}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{image_project4/ex3/ex3_snow_torque.png}
+    \caption{Snow surface: finer and more frequent torque modulation at
+    lower levels (front $\sim$ up to $950$\,Nm, rear $\sim100\!-\!150$\,Nm).}
+    \label{fig:snow_torque}
+\end{figure}
+
+On snow the very low friction stretches the stop to $\approx13.7$\,s and
+$\approx140$\,m. Despite the extreme conditions the controller still
+prevents sustained lock: after an initial front excursion to
+$\sigma\approx-0.75$ the slip is brought back and modulated around
+$-0.1$ to $-0.4$ for the rest of the manoeuvre. The torque
+(Figure~\ref{fig:snow_torque}) cycles more frequently and at much lower
+levels than on wet; the faster discharge ($K_\mathrm{release}=5500$) and
+the gentler recharge ($K_\mathrm{reapply}=200$) are precisely what keeps
+the slippery wheel from re-locking and avoids chattering.
+
+%----------------------------------------------------------------------
+\subsection{Comments}
+%----------------------------------------------------------------------
+Using only the wheel acceleration and a lock flag, the conjugate-boundary
+ABS keeps the slip in the high-friction region on both low-$\mu$
+surfaces -- no slip estimation is required, which is the whole point of
+the method and its key practical advantage over the controller of
+Exercise 2. The stopping distance scales directly with the surface
+friction (snow $\gg$ wet), and the saw-tooth brake-torque trace
+reproduces the pressure modulation of real production ABS. The price to
+pay is a coarser, oscillatory regulation around the peak rather than the
+precise slip tracking of the (non-deployable) Exercise-2 controller.
+
+%======================================================================
+\section{Benchmark and Summary}
+\label{sec:bench}
+%======================================================================
+Table~\ref{tab:bench} collects the stopping distances of all the
+manoeuvres. The figures are read from the speed/distance histories;
+distances of different exercises are not directly comparable because the
+brake command $h_b$ differs, but within each block the trends are
+consistent.
+
+\begin{table}[H]
+    \centering
+    \footnotesize
+    \begin{tabular}{llccl}
+        \toprule
+        \textbf{Exercise / case} & \textbf{Settings} &
+        \textbf{Dist.\ [m]} & \textbf{Time [s]} & \textbf{Wheel behaviour} \\
+        \midrule
+        Ex1 -- gentle      & $h_b{=}0.25,\,K_b{=}2.33$ & $\approx47$ & $>4$    & no lock (rolls) \\
+        Ex1 -- hard        & $h_b{=}0.90,\,K_b{=}1.7$  & $\approx35$ & $3.05$  & all wheels locked \\
+        Ex1 -- $+15\%$     & $m{=}1173,\,C_x{=}0.38$   & $\approx33$ & $2.9$   & rear lock @ $0.6$\,s \\
+        Ex1 -- $-15\%$     & $0.85\times$ nominal      & $\approx30$ & $2.6$   & rear lock @ $0.45$\,s \\
+        Ex1 -- geared/neutral & $h_b{=}1$              & $\approx35$ & $3.05$  & identical, all locked \\
+        \midrule
+        Ex2 -- $\sigma_r{=}{-}0.1$ & $K_\mathrm{gain}{=}{-}600$  & $\approx61$ & $4.35$ & shallow, stable \\
+        Ex2 -- $\sigma_r{=}{-}0.2$ & $K_\mathrm{gain}{=}{-}600$  & $\approx60$ & $4.25$ & limit cycle @ peak \\
+        Ex2 -- $\sigma_r{=}{-}0.3$ & $K_\mathrm{gain}{=}{-}600$  & $\approx61$ & $4.35$ & intermittent lock \\
+        Ex2 -- tuned       & $\sigma_r{=}{-}0.2,\,K_\mathrm{gain}{=}{-}1450$ & $\approx46$ & $3.5$ & best dry slip ABS \\
+        Ex2 -- dry         & $K_\mathrm{gain}{=}{-}1450,\,h_b{=}0.5$ & $\approx39$ & $3.0$ & limit cycle (growing) \\
+        Ex2 -- wet         & $K_\mathrm{gain}{=}{-}700,\,h_b{=}0.5$  & $\approx53$ & $3.9$ & well-damped @ $-0.2$ \\
+        \midrule
+        Ex3 -- wet         & conjugate boundary        & $\approx45$  & $4.6$  & bounded, no lock \\
+        Ex3 -- snow        & conjugate boundary        & $\approx140$ & $13.7$ & bounded, no lock \\
+        \bottomrule
+    \end{tabular}
+    \caption{Stopping-distance benchmark across the three exercises.}
+    \label{tab:bench}
+\end{table}
+
+%======================================================================
+\section{Conclusions}
+%======================================================================
+The project followed the braking problem from the open-loop driveline
+model to two complementary ABS designs.
+\begin{itemize}
+    \item \textbf{Exercise 1} quantified the open-loop behaviour:
+          increasing $h_b$ shortens the stop only until the wheels lock,
+          a larger $K_b$ (front bias) protects the rear axle, the
+          stopping distance is dominated by the vehicle mass (with a
+          $\pm15\%$ swing giving $\approx\pm5\%$ distance) and weakly by
+          the drag, and -- under a hard lock-up stop -- the engine
+          braking of the engaged gear makes no practical difference with
+          respect to neutral.
+    \item \textbf{Exercise 2} showed that a slip-regulating controller
+          recovers the lost braking by holding $\sigma$ at the friction
+          peak. The reference $\sigma_r=-0.2$ is the right target
+          (below it the grip is under-used, beyond it the wheel locks),
+          increasing $|K_\mathrm{gain}|$ minimises the distance up to
+          the onset of locking, and the optimal gain is
+          surface-dependent (it had to be reduced from $-1450$ on dry to
+          $-700$ on wet). The strategy is, however, not directly
+          deployable because the slip is not measurable on a real
+          vehicle.
+    \item \textbf{Exercise 3} delivered a deployable ABS that uses only
+          the wheel acceleration. The IDLE/RELEASE/REAPPLY state machine
+          modulates the brake pressure in a saw-tooth limit cycle and
+          keeps the slip in the useful band on both wet
+          ($\approx45$\,m) and snow ($\approx140$\,m) surfaces, with no
+          slip estimation and no sustained lock.
+\end{itemize}
+The overall message is consistent with real ABS practice: locking the
+wheels is never optimal -- the shortest \emph{and} controllable stop is
+obtained by keeping the longitudinal slip near the friction peak. A
+slip controller defines that ideal target but needs an unmeasurable
+quantity, whereas the acceleration-based conjugate-boundary method
+approximates the same behaviour with quantities that are actually
+available on board, which is why it is the approach adopted in practice.
